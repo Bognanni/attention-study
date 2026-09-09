@@ -1,0 +1,26 @@
+.idea/
+.DS_Store
+Thumbs.db
+gsasrec_env/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.vscode
+
+# Datasets
+datasets/
+
+# Extensions of datasets
+*.jsonl
+*.dat
+*.csv
+
+# Results
+attention_plots/
+
+# Generated models
+models
+
+# Useless stuff
