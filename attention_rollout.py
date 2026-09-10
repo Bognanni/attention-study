@@ -48,6 +48,39 @@ def compute_attention_rollout(attentions):
         
     return rollout
 
+def compute_per_head_attention_rollout(attentions):
+    """
+    Computes the Attention Rollout independently for each head.
+    
+    Returns:
+        rollout: The computed per-head attention rollout matrix of shape [batch_size, num_heads, seq_len, seq_len]
+    """
+    batch_size = attentions[0].size(0)
+    num_heads = attentions[0].size(1)
+    seq_len = attentions[0].size(2)
+    
+    # Initialize rollout as the identity matrix
+    # Shape: [batch_size, num_heads, seq_len, seq_len]
+    rollout = torch.eye(seq_len).unsqueeze(0).unsqueeze(0).repeat(batch_size, num_heads, 1, 1).to(attentions[0].device)
+    
+    for layer_attention in attentions:
+        # layer_attention shape: [batch_size, num_heads, seq_len, seq_len]
+        
+        # Add Identity matrix to account for residual connections
+        identity = torch.eye(seq_len).unsqueeze(0).unsqueeze(0).to(layer_attention.device)
+        attn_with_residual = layer_attention + identity
+        
+        # Row-normalize the matrix so that each row sums to 1
+        row_sums = attn_with_residual.sum(dim=-1, keepdim=True)
+        row_sums = torch.clamp(row_sums, min=1e-9)
+        norm_attention = attn_with_residual / row_sums
+        
+        # Multiply with the rollout from previous layers
+        # torch.matmul natively handles batch matrix multiplication over extra dimensions
+        rollout = torch.matmul(norm_attention, rollout)
+        
+    return rollout
+
 def plot_rollout_heatmaps(rollout, item_ids, save_dir="attention_plots", seq_idx=0):
     """
     Plots the Attention Rollout matrix as a heatmap with Item IDs on the axes.
@@ -77,12 +110,46 @@ def plot_rollout_heatmaps(rollout, item_ids, save_dir="attention_plots", seq_idx
     plt.close()
     print(f"Attention Rollout heatmap saved to {save_path}")
 
+def plot_per_head_rollout_heatmaps(rollout, item_ids, save_dir="attention_plots", seq_idx=0):
+    """
+    Plots the Per-Head Attention Rollout matrix as a heatmap.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    num_heads = rollout.size(1)
+    
+    fig, axes = plt.subplots(1, num_heads, figsize=(20 * num_heads, 16), squeeze=False)
+    
+    # Extract the rollout for the specific sequence and move to CPU
+    # Shape: [num_heads, seq_len, seq_len]
+    r_matrix = rollout[seq_idx].detach().cpu().numpy()
+    
+    # Convert item IDs to strings for labels
+    labels = [str(int(x)) for x in item_ids]
+    
+    for head_idx in range(num_heads):
+        ax = axes[0, head_idx]
+        sns.heatmap(r_matrix[head_idx], cmap="viridis", ax=ax, cbar=True, vmin=0, vmax=1,
+                    xticklabels=labels, yticklabels=labels)
+        ax.set_title(f"Attention Rollout - Head {head_idx + 1}")
+        ax.set_ylabel("Target (Query) Item ID")
+        ax.set_xlabel("Source (Key) Item ID")
+        
+        ax.tick_params(axis='x', labelsize=6, rotation=90)
+        ax.tick_params(axis='y', labelsize=6, rotation=0)
+            
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, f"attention_rollout_per_head_seq_{seq_idx}.png")
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    print(f"Per-Head Attention Rollout heatmap saved to {save_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Extract and visualize Attention Rollout")
     parser.add_argument('--config', type=str, default='config_ml1m_sasrec.py', help='Configuration file')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to the model checkpoint')
     parser.add_argument('--save_dir', type=str, default='attention_plots', help='Directory to save the heatmaps')
     parser.add_argument('--num_samples', type=int, default=1, help='Number of sequences to visualize from the test set')
+    parser.add_argument('--per_head', action='store_true', help='Compute Attention Rollout independently for each head')
     args = parser.parse_args()
 
     # Load configuration
@@ -119,13 +186,22 @@ def main():
     print(f"Extracted attention from {len(attentions)} transformer blocks.")
     
     # Compute Rollout
-    print("Computing Attention Rollout...")
-    rollout = compute_attention_rollout(attentions)
-    
-    # Plot and save heatmaps
-    print("Generating Rollout heatmaps...")
-    for i in range(min(args.num_samples, input_seqs.size(0))):
-        plot_rollout_heatmaps(rollout, input_seqs[i], save_dir=args.save_dir, seq_idx=i)
+    if args.per_head:
+        print("Computing Per-Head Attention Rollout...")
+        rollout = compute_per_head_attention_rollout(attentions)
+        
+        # Plot and save heatmaps
+        print("Generating Per-Head Rollout heatmaps...")
+        for i in range(min(args.num_samples, input_seqs.size(0))):
+            plot_per_head_rollout_heatmaps(rollout, input_seqs[i], save_dir=args.save_dir, seq_idx=i)
+    else:
+        print("Computing Averaged Attention Rollout...")
+        rollout = compute_attention_rollout(attentions)
+        
+        # Plot and save heatmaps
+        print("Generating Rollout heatmaps...")
+        for i in range(min(args.num_samples, input_seqs.size(0))):
+            plot_rollout_heatmaps(rollout, input_seqs[i], save_dir=args.save_dir, seq_idx=i)
         
 if __name__ == '__main__':
     main()
