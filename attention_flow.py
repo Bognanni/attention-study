@@ -38,7 +38,6 @@ def compute_attention_flow(attentions):
     
     flow_matrices = []
     
-    # Check CPU cores for multiprocessing
     num_cores = cpu_count()
     print(f"Using {num_cores} CPU cores for parallel Max-Flow computation...")
     

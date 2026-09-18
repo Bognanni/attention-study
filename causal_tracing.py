@@ -1,179 +1,129 @@
-import argparse
-import os
 import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-from tqdm import tqdm
+import torch.nn as nn
 
-from dataset_utils import get_test_dataloader
-from utils import build_model, get_device, load_config
+from interpretability_eval import FaithfulnessEvaluator
 
-def get_logits(model, input_seqs):
+class HookManager:
     """
-    Runs a forward pass and computes the final item logits.
+    Safely manages PyTorch forward hooks for Activation Patching.
+    Ensures hooks are automatically cleared to prevent memory leaks.
     """
-    seq_emb, _ = model(input_seqs)
-    
-    # We only care about predicting the *next* item, so we take the hidden state
-    # at the final sequence step for the batch
-    final_seq_emb = seq_emb[:, -1, :]
-    
-    # Project hidden states to vocabulary logits
-    output_embeddings = model.get_output_embeddings()
-    scores = torch.einsum('bd,nd->bn', final_seq_emb, output_embeddings.weight)
-    
-    # Mask out padding token and item 0 (as done in the model's get_predictions)
-    scores[:, 0] = float("-inf")
-    scores[:, model.num_items + 1:] = float("-inf")
-    
-    return scores
-
-def get_ablation_hook(target_position):
-    """
-    Returns a PyTorch forward hook that zero-ablates the hidden state
-    at a specific sequence position. Robustly handles both single tensors
-    and tuples (like MHA or full layer outputs).
-    """
-    def hook(module, input, output):
-        # Check if output is a tuple (e.g., from TransformerBlock or MultiHeadAttention)
-        if isinstance(output, tuple):
-            seq = output[0]
-            # CRITICAL: We must clone to avoid PyTorch in-place operation errors
-            patched_seq = seq.clone()
-            
-            # Zero-Ablation: Destroy all information at the target sequence position
-            patched_seq[:, target_position, :] = 0.0
-            
-            # Reconstruct the tuple with the patched tensor
-            return (patched_seq,) + output[1:]
-        else:
-            # Output is a single tensor (e.g., from an FFN Linear layer)
-            patched_seq = output.clone()
-            
-            # Zero-Ablation
-            patched_seq[:, target_position, :] = 0.0
-            
-            return patched_seq
-            
-    return hook
-
-def main():
-    parser = argparse.ArgumentParser(description="Causal Tracing via Activation Patching (Zero-Ablation)")
-    parser.add_argument('--config', type=str, default='config_ml1m_sasrec.py', help='Configuration file')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to the model checkpoint')
-    parser.add_argument('--save_dir', type=str, default='causal_plots', help='Directory to save the heatmaps')
-    parser.add_argument('--num_samples', type=int, default=1, help='Number of sequences to visualize from the test set')
-    parser.add_argument('--patch_target', type=str, choices=['layer', 'mha', 'ffn'], default='layer',
-                        help='Which submodule to ablate (layer=full block, mha=attention, ffn=feed-forward)')
-    args = parser.parse_args()
-
-    # Load configuration
-    print(f"Loading configuration from: {args.config}")
-    config = load_config(args.config)
-    
-    # Setup device
-    device = get_device()
-    print(f"Using device: {device}")
-
-    # Build model
-    model = build_model(config)
-    model = model.to(device)
-    
-    # Load checkpoint
-    print(f"Loading checkpoint from: {args.checkpoint}")
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    model.eval()
-
-    # Get data
-    print("Loading test dataloader...")
-    test_dataloader = get_test_dataloader(config.dataset_name, batch_size=args.num_samples, max_length=config.sequence_length)
-    
-    # Get a single batch of size 1
-    batch = next(iter(test_dataloader))
-    input_seqs = batch[0].to(device)
-    
-    seq_len = input_seqs.size(1)
-    num_layers = len(model.transformer_blocks)
-
-    print(f"Processing sequence of length {seq_len} across {num_layers} layers.")
-
-    # Clean Run (Baseline)
-    with torch.no_grad():
-        clean_logits = get_logits(model, input_seqs)
+    def __init__(self):
+        # Dictionary to store cached activations for each module
+        self.activations = {}
+        # List to keep track of registered hooks for cleanup
+        self.handles = []
         
-        # Identify the top-1 recommended item (argmax)
-        top_item_idx = torch.argmax(clean_logits, dim=-1).item()
-        clean_logit_value = clean_logits[0, top_item_idx].item()
+    def get_caching_hook(self, name):
+        def hook(module, input, output):
+            """
+            Caches the output of the module during the clean run.
+            """
+            if isinstance(output, tuple):
+                self.activations[name] = output[0].clone().detach()
+            else:
+                self.activations[name] = output.clone().detach()
+        return hook
         
-    print(f"Baseline Clean Run -> Predicted Item: {top_item_idx} | Logit: {clean_logit_value:.4f}")
+    def get_patching_hook(self, name, position):
+        def hook(module, input, output):
+            """
+            Patches the output of the module at the specified position with the cached activation.
+            """
+            if isinstance(output, tuple):
+                patched = output[0].clone()
+                patched[:, position, :] = self.activations[name][:, position, :]
+                return (patched,) + output[1:]
+            else:
+                patched = output.clone()
+                patched[:, position, :] = self.activations[name][:, position, :]
+                return patched
+        return hook
+        
+    def clear_hooks(self):
+        """
+        Removes all registered hooks to prevent memory leaks.
+        """
+        for h in self.handles:
+            h.remove()
+        self.handles = []
 
-    # Systematic Patching Loop
-    # Initialize a 2D matrix to store the causal logit drops
-    causal_heatmap_matrix = np.zeros((num_layers, seq_len))
-    
-    for l in range(num_layers):
-        # Dynamically select the target module based on user input
-        if args.patch_target == 'layer':
-            target_module = model.transformer_blocks[l]
-        elif args.patch_target == 'mha':
-            # Submodule name in your TransformerBlock implementation
-            target_module = model.transformer_blocks[l].multihead_attention
-        elif args.patch_target == 'ffn':
-            # In SASRec, the FFN is built with dense1 and dense2 inside the block.
-            # Ablating dense2 safely zeros out the FFN's output right before the residual connection.
-            target_module = model.transformer_blocks[l].dense2
-            
-        for p in tqdm(range(seq_len), desc=f"Ablating Layer {l} ({args.patch_target})"):
-            # Register the hook on the specific submodule
-            hook_handle = target_module.register_forward_hook(get_ablation_hook(target_position=p))
-            
-            try:
-                with torch.no_grad():
-                    # Run a forward pass with the hook active
-                    patched_logits = get_logits(model, input_seqs)
-                    
-                    # Extract the logit of the SAME top-1 item
-                    patched_logit_value = patched_logits[0, top_item_idx].item()
-                    
-                    # Calculate the Direct Logit Drop
-                    logit_drop = clean_logit_value - patched_logit_value
-                    
-                    # Store it
-                    causal_heatmap_matrix[l, p] = logit_drop
-            finally:
-                # Safely remove the hook so it doesn't affect future passes
-                hook_handle.remove()
-                
-    # Visualization
-    print("Generating Causal Tracing Heatmap...")
-    os.makedirs(args.save_dir, exist_ok=True)
-    
-    # Create the figure
-    fig, ax = plt.subplots(figsize=(20, max(4, 2 * num_layers)))
-    
-    # Get Item IDs for the X-axis labels
-    item_ids = [str(int(x)) for x in input_seqs[0].cpu().numpy()]
-    layer_labels = [f"Layer {l}" for l in range(num_layers)]
-    
-    # Plot the heatmap
-    sns.heatmap(causal_heatmap_matrix, cmap="coolwarm", center=0, ax=ax, cbar=True,
-                xticklabels=item_ids, yticklabels=layer_labels)
-                
-    ax.set_title(f"Causal Tracing (Zero-Ablation) | Target: {args.patch_target.upper()}\nTarget Predicted Item: {top_item_idx}")
-    ax.set_ylabel("Transformer Block Ablated")
-    ax.set_xlabel("Ablated Sequence Position (Item ID)")
-    
-    # Adjust tick params for readability
-    ax.tick_params(axis='x', labelsize=6, rotation=90)
-    ax.tick_params(axis='y', labelsize=10, rotation=0)
-    
-    plt.tight_layout()
-    save_path = os.path.join(args.save_dir, f"causal_tracing_heatmap_{args.patch_target}.png")
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-    
-    print(f"Causal Tracing Heatmap saved to {save_path}")
 
-if __name__ == '__main__':
-    main()
+class ActivationPatcher:
+    """
+    Orchestrates the 3-step Module-Level Activation Patching protocol.
+    """
+    def __init__(self, model):
+        self.model = model
+        self.manager = HookManager()
+        self.modules = self._get_target_modules()
+        
+    def _get_target_modules(self):
+        """
+        Identifies and returns a dictionary of target modules for patching.
+        Keys are module names, values are the corresponding nn.Module objects.
+        """
+        modules = {}
+        for l, block in enumerate(self.model.transformer_blocks):
+            modules[f'L{l}_MHA'] = block.multihead_attention
+            modules[f'L{l}_FFN'] = block.dense2
+            # The residual stream output is the final LayerNorm of the block
+            # Actually, to patch the residual stream, we can patch the block output itself
+            modules[f'L{l}_Residual'] = block
+        return modules
+
+    def run_patching_protocol(self, input_seq, target_item, pad_token_id, epsilon=1e-3):
+        """
+        Executes Clean -> Corrupt -> Restore for all valid items.
+        Returns: {module_name: [restoration_scores_for_each_item]}
+        """
+        valid_idx = (input_seq != pad_token_id).nonzero(as_tuple=True)[0]
+        seq_2d = input_seq.unsqueeze(0)
+        
+        module_names = list(self.modules.keys())
+        results = {m: torch.zeros(len(input_seq), device=input_seq.device) for m in module_names}
+        
+        # Clean run (Cache all internal states)
+        for name, mod in self.modules.items():
+            self.manager.handles.append(mod.register_forward_hook(self.manager.get_caching_hook(name)))
+            
+        with torch.no_grad():
+            clean_logits = FaithfulnessEvaluator.get_logits(self.model, seq_2d)
+            # Single logit for the target item
+            clean_logit = clean_logits[0, target_item].item()
+            
+        self.manager.clear_hooks()
+        
+        # Corrupt and restore loops
+        for pos in valid_idx:
+            corrupted_seq = input_seq.clone()
+            corrupted_seq[pos] = pad_token_id
+            corrupted_seq_2d = corrupted_seq.unsqueeze(0)
+            
+            with torch.no_grad():
+                corrupt_logits = FaithfulnessEvaluator.get_logits(self.model, corrupted_seq_2d)
+                corrupt_logit = corrupt_logits[0, target_item].item()
+
+            # Once computed the logit associated with the target item, we can compute the logit drop
+            base_drop = clean_logit - corrupt_logit
+            
+            # Mathematical Safety Filter (if the item wasn't actually causal, we skip the restoration runs)
+            if base_drop < epsilon:
+                for name in module_names:
+                    results[name][pos] = 0.0
+                continue
+                
+            # Restoration runs
+            for name, mod in self.modules.items():
+                h = mod.register_forward_hook(self.manager.get_patching_hook(name, pos))
+                try:
+                    with torch.no_grad():
+                        patch_logits = FaithfulnessEvaluator.get_logits(self.model, corrupted_seq_2d)
+                        patch_logit = patch_logits[0, target_item].item()
+                        
+                    restoration_score = (patch_logit - corrupt_logit) / base_drop
+                    results[name][pos] = restoration_score
+                finally:
+                    h.remove()
+                    
+        return results, module_names, valid_idx
