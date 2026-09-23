@@ -20,6 +20,8 @@ datasets/
 # Results
 attention_plots/
 causal_plots/
+protocol_plots/
+protocol_plots_100/
 
 # Generated models
 models
