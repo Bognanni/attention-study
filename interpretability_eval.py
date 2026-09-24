@@ -57,10 +57,16 @@ class FaithfulnessEvaluator:
             base_logits = FaithfulnessEvaluator.get_logits(model, seq_2d)
             base_logit = base_logits[0, target_item].item()
             
+        # Hybrid masking rule: padding for history (clean ablation), random token for T-0 (prevent collapse)
+        def get_masked_value(idx):
+            if idx == valid_idx[-1].item():
+                return torch.randint(1, model.num_items + 1, (1,), device=input_seq.device).item()
+            return pad_token_id
+            
         # Comprehensiveness: Mask Top-K
         comp_seq = input_seq.clone()
         for idx in topk_idx:
-            comp_seq[idx] = pad_token_id
+            comp_seq[idx] = get_masked_value(idx)
             
         with torch.no_grad():
             comp_logits = FaithfulnessEvaluator.get_logits(model, comp_seq.unsqueeze(0))
@@ -72,7 +78,7 @@ class FaithfulnessEvaluator:
         suff_seq = input_seq.clone()
         for idx in valid_idx:
             if idx not in topk_idx:
-                suff_seq[idx] = pad_token_id
+                suff_seq[idx] = get_masked_value(idx)
                 
         with torch.no_grad():
             suff_logits = FaithfulnessEvaluator.get_logits(model, suff_seq.unsqueeze(0))
@@ -115,7 +121,11 @@ class FaithfulnessEvaluator:
             
         for idx in valid_idx:
             ablated_seq = input_seq.clone()
-            ablated_seq[idx] = pad_token_id
+            if idx == valid_idx[-1].item():
+                masked_val = torch.randint(1, model.num_items + 1, (1,), device=input_seq.device).item()
+            else:
+                masked_val = pad_token_id
+            ablated_seq[idx] = masked_val
             
             with torch.no_grad():
                 ablated_logits = FaithfulnessEvaluator.get_logits(model, ablated_seq.unsqueeze(0))
