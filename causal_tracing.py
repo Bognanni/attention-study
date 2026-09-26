@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from interpretability_eval import FaithfulnessEvaluator
+from metrics_utils import FaithfulnessEvaluator
 
 class HookManager:
     """

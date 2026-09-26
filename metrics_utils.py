@@ -63,7 +63,7 @@ class FaithfulnessEvaluator:
                 return torch.randint(1, model.num_items + 1, (1,), device=input_seq.device).item()
             return pad_token_id
             
-        # Comprehensiveness: Mask Top-K
+        # Fixed Comprehensiveness: Mask Top-K
         comp_seq = input_seq.clone()
         for idx in topk_idx:
             comp_seq[idx] = get_masked_value(idx)
@@ -71,7 +71,8 @@ class FaithfulnessEvaluator:
         with torch.no_grad():
             comp_logits = FaithfulnessEvaluator.get_logits(model, comp_seq.unsqueeze(0))
             comp_logit = comp_logits[0, target_item].item()
-            
+
+        # higher is better
         comprehensiveness = base_logit - comp_logit
         
         # Sufficiency: Keep Top-K
@@ -83,7 +84,8 @@ class FaithfulnessEvaluator:
         with torch.no_grad():
             suff_logits = FaithfulnessEvaluator.get_logits(model, suff_seq.unsqueeze(0))
             suff_logit = suff_logits[0, target_item].item()
-            
+
+        # lower is better
         sufficiency = base_logit - suff_logit
         
         return comprehensiveness, sufficiency
@@ -143,3 +145,29 @@ class FaithfulnessEvaluator:
                 is_highly_causal[idx] = True
                 
         return causal_drops, is_highly_causal, valid_idx
+
+def calculate_popularity_baseline(dataset_name, head_percentage=0.20):
+    import os
+    train_file = f"datasets/{dataset_name}/train/input.txt"
+    item_counts = {}
+    total_train_interactions = 0
+    if os.path.exists(train_file):
+        with open(train_file, 'r') as f:
+            for line in f:
+                items = line.strip().split()
+                for item in items:
+                    item_id = int(item)
+                    item_counts[item_id] = item_counts.get(item_id, 0) + 1
+                    total_train_interactions += 1
+                    
+        sorted_items = sorted(item_counts.items(), key=lambda x: x[1], reverse=True)
+        num_unique_items = len(sorted_items)
+        head_cutoff = int(num_unique_items * head_percentage)
+        head_items_set = set([item[0] for item in sorted_items[:head_cutoff]])
+        
+        head_interactions = sum([item[1] for item in sorted_items[:head_cutoff]])
+        dataset_head_ratio = head_interactions / total_train_interactions if total_train_interactions > 0 else 0
+        return head_items_set, dataset_head_ratio
+    else:
+        print(f"\nWarning: Train file not found at {train_file}. Skipping popularity baseline.")
+        return set(), 0.0
