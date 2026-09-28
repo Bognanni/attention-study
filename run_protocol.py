@@ -31,7 +31,9 @@ def main():
     
     pad_token_id = model.num_items + 1
     test_dataloader = get_test_dataloader(config.dataset_name, batch_size=args.num_samples, max_length=config.sequence_length)
+    # Get the first batch of sequences from the test dataloader
     batch = next(iter(test_dataloader))
+    # batch[0] contains the input sequences, batch[1] contains the corresponding labels
     input_seqs_batch = batch[0].to(device)
     actual_samples = input_seqs_batch.size(0)
 
@@ -97,6 +99,7 @@ def main():
         seq_max_causal = causal_drops[valid_idx].max().item()
         
         for idx in valid_idx_np:
+            # Max scaling to normalize both metrics to [0, 1]
             norm_r = rollout_scores[idx].item() / seq_max_rollout if seq_max_rollout > 0 else 0
             norm_c = causal_drops[idx].item() / seq_max_causal if seq_max_causal > 0 else 0
             

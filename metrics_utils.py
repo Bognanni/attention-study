@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import os
 from scipy.stats import spearmanr
 
 class FaithfulnessEvaluator:
@@ -23,7 +24,8 @@ class FaithfulnessEvaluator:
     @staticmethod
     def compute_jaccard(heuristic_scores, causal_scores, valid_idx, k=3):
         """
-        Computes the Jaccard similarity between the top-k items of the heuristic and causal rankings."""
+        Computes the Jaccard similarity between the top-k items of the heuristic and causal rankings.
+        """
         h_valid = heuristic_scores[valid_idx].cpu().numpy()
         c_valid = causal_scores[valid_idx].cpu().numpy()
         
@@ -93,7 +95,8 @@ class FaithfulnessEvaluator:
     @staticmethod
     def get_logits(model, input_seqs):
         """
-        Computes the logits for the given input sequences and for each item in the catalog using the model."""
+        Computes the logits for the given input sequences and for each item in the catalog using the model.
+        """
         seq_emb, _ = model(input_seqs)
         final_seq_emb = seq_emb[:, -1, :]
         output_embeddings = model.get_output_embeddings()
@@ -147,7 +150,9 @@ class FaithfulnessEvaluator:
         return causal_drops, is_highly_causal, valid_idx
 
 def calculate_popularity_baseline(dataset_name, head_percentage=0.20):
-    import os
+    """
+    Computes the popularity baseline for the dataset.
+    Returns the set of head items and the ratio of interactions they account for."""
     train_file = f"datasets/{dataset_name}/train/input.txt"
     item_counts = {}
     total_train_interactions = 0
@@ -163,8 +168,10 @@ def calculate_popularity_baseline(dataset_name, head_percentage=0.20):
         sorted_items = sorted(item_counts.items(), key=lambda x: x[1], reverse=True)
         num_unique_items = len(sorted_items)
         head_cutoff = int(num_unique_items * head_percentage)
+        # ids of the top 20% most popular items
         head_items_set = set([item[0] for item in sorted_items[:head_cutoff]])
-        
+
+        # interaction of head items / total interactions
         head_interactions = sum([item[1] for item in sorted_items[:head_cutoff]])
         dataset_head_ratio = head_interactions / total_train_interactions if total_train_interactions > 0 else 0
         return head_items_set, dataset_head_ratio

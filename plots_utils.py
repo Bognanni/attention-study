@@ -3,12 +3,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 def plot_attention_vs_causation_scatter(scatter_rollout_hist, scatter_causal_hist, scatter_rollout_t0, scatter_causal_t0, save_dir):
+    """
+    Plots a scatter plot comparing Attention Rollout scores against Causal Impact scores.
+    Historical tokens are shown in blue, while the last token (T-0) is highlighted in red.
+    """
     fig, ax = plt.subplots(figsize=(8, 8))
     
-    # Plot historical items (The "False Positives" cloud)
+    # Plot historical items
     ax.scatter(scatter_rollout_hist, scatter_causal_hist, color='blue', alpha=0.3, label='Historical Tokens (T-1, T-2...)', edgecolors='none')
     
-    # Plot T-0 (The "True Positives" cluster)
+    # Plot T-0
     ax.scatter(scatter_rollout_t0, scatter_causal_t0, color='red', alpha=0.8, marker='x', s=100, label='Last Token (T-0)')
     
     # Add a diagonal line for reference (perfect correlation)
@@ -17,6 +21,7 @@ def plot_attention_vs_causation_scatter(scatter_rollout_hist, scatter_causal_his
     ax.set_xlabel('Normalized Attention Rollout')
     ax.set_ylabel('Normalized Causal Impact (Logit Drop)')
     ax.set_title('Graph 1: Attention Rollout vs Causal Impact')
+    ax.set_ylim(-2.5, 1.2)  # Zoom in to ignore extreme negative outliers
     ax.legend()
     
     plt.tight_layout()
@@ -27,6 +32,9 @@ def plot_attention_vs_causation_scatter(scatter_rollout_hist, scatter_causal_his
 
 
 def plot_local_causal_tracing(avg_local_restoration, module_names, total_causal_items, save_dir):
+    """
+    Plots a bar chart showing the average restoration scores for each module when local tokens are patched.
+    """
     fig, ax = plt.subplots(figsize=(10, 6))
     x_pos = np.arange(len(module_names))
     
@@ -44,6 +52,9 @@ def plot_local_causal_tracing(avg_local_restoration, module_names, total_causal_
 
 
 def plot_position_distribution(causal_positions_count, total_causal_items, save_dir):
+    """
+    Plots a bar chart showing the distribution of highly causal items across different token positions.
+    """
     if total_causal_items == 0:
         print("Not enough causal items for Graph 3.")
         return
