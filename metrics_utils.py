@@ -178,3 +178,38 @@ def calculate_popularity_baseline(dataset_name, head_percentage=0.20):
     else:
         print(f"\nWarning: Train file not found at {train_file}. Skipping popularity baseline.")
         return set(), 0.0
+
+def get_item_popularity_bins(dataset_name):
+    """
+    Groups all items into 10 deciles based on their popularity (frequency).
+    Decile 1 = Top 10% most popular items.
+    Returns:
+    - item_to_bin: mapping item_id -> decile_string (e.g. 'Top 10-20%').
+    - item_to_percentile: mapping item_id -> exact percentile float (0.0 to 100.0)
+    """
+    train_file = f"datasets/{dataset_name}/train/input.txt"
+    item_counts = {}
+    if os.path.exists(train_file):
+        with open(train_file, 'r') as f:
+            for line in f:
+                for item in line.strip().split():
+                    item_id = int(item)
+                    item_counts[item_id] = item_counts.get(item_id, 0) + 1
+                    
+        sorted_items = sorted(item_counts.keys(), key=lambda x: item_counts[x], reverse=True)
+        num_items = len(sorted_items)
+        
+        item_to_bin = {}
+        item_to_percentile = {}
+        for rank, item_id in enumerate(sorted_items):
+            percentile = (rank / num_items) * 100
+            # Find which decile it belongs to
+            decile_idx = int(percentile // 10)
+            if decile_idx == 10: decile_idx = 9 # edge case for exactly 100%
+            
+            bin_name = f"Top {decile_idx*10}-{(decile_idx+1)*10}%"
+            item_to_bin[item_id] = bin_name
+            item_to_percentile[item_id] = percentile
+            
+        return item_to_bin, item_to_percentile
+    return {}, {}

@@ -10,8 +10,13 @@ from utils import build_model, get_device, load_config
 
 from attention_rollout import compute_attention_rollout
 from causal_tracing import ActivationPatcher
-from metrics_utils import FaithfulnessEvaluator,calculate_popularity_baseline
-from plots_utils import plot_attention_vs_causation_scatter, plot_local_causal_tracing, plot_position_distribution
+from metrics_utils import FaithfulnessEvaluator, calculate_popularity_baseline, get_item_popularity_bins
+from plots_utils import (
+    plot_attention_vs_causation_scatter, plot_local_causal_tracing, 
+    plot_position_distribution, plot_popularity_distribution,
+    plot_local_causal_tracing_box, plot_position_distribution_box,
+    plot_popularity_distribution_box
+)
 
 def main():
     parser = argparse.ArgumentParser(description="Attention vs Causation")
@@ -55,6 +60,11 @@ def main():
     head_items_set, dataset_head_ratio = calculate_popularity_baseline(config.dataset_name)
     print(f"\n--- POPULARITY BASELINE ---")
     print(f"Dataset Analysis: Top 20% of items (Head) account for {dataset_head_ratio*100:.2f}% of all historical interactions.")
+
+    item_to_bin, item_to_percentile = get_item_popularity_bins(config.dataset_name)
+    causal_popularity_count = {}
+    causal_popularity_raw = []
+    causal_positions_raw = []
 
     # Phase 1 Metrics Storage
     spearman_scores, jaccard_scores = [], []
@@ -118,11 +128,17 @@ def main():
             total_causal_items += 1
             if actual_item_id in head_items_set:
                 causal_head_count += 1
+                
+            if actual_item_id in item_to_bin:
+                bin_name = item_to_bin[actual_item_id]
+                causal_popularity_count[bin_name] = causal_popularity_count.get(bin_name, 0) + 1
+                causal_popularity_raw.append(item_to_percentile[actual_item_id])
             
             pos_in_valid = np.where(valid_idx_np == idx)[0][0]
             relative_pos = len(valid_idx_np) - 1 - pos_in_valid
             pos_label = f"T-{relative_pos}"
             causal_positions_count[pos_label] = causal_positions_count.get(pos_label, 0) + 1
+            causal_positions_raw.append(relative_pos)
             
         # GRAPH 2 DATA: Local Causal Tracing
         if len(vital_indices) == 0:
@@ -143,8 +159,8 @@ def main():
     print("\n--- PHASE 1 DATASET RESULTS ---")
     print(f"Average Spearman Correlation: {np.mean(spearman_scores):.4f}")
     print(f"Average Top-3 Jaccard: {np.mean(jaccard_scores):.4f}")
-    print(f"\n[Attention Rollout] Comp: {np.mean(comp_scores):.4f} | Suff: {np.mean(suff_scores):.4f}")
-    print(f"[Causal Baseline]   Comp: {np.mean(causal_comp_scores):.4f} | Suff: {np.mean(causal_suff_scores):.4f}")
+    print(f"\n[Attention Rollout] Comp@3: {np.mean(comp_scores):.4f} | Suff@3: {np.mean(suff_scores):.4f}")
+    print(f"[Causal Baseline]   Comp@3: {np.mean(causal_comp_scores):.4f} | Suff@3: {np.mean(causal_suff_scores):.4f}")
 
     print("\n--- CAUSAL POPULARITY RESULTS ---")
     if total_causal_items > 0:
@@ -172,6 +188,14 @@ def main():
     
     # GRAPH 3: Position Distribution (The importance of the last tokens)
     plot_position_distribution(causal_positions_count, total_causal_items, args.save_dir)
+    plot_position_distribution_box(causal_positions_raw, total_causal_items, args.save_dir)
+    
+    # GRAPH 4: Popularity Distribution of Highly Causal Items
+    plot_popularity_distribution(causal_popularity_count, total_causal_items, args.save_dir)
+    plot_popularity_distribution_box(causal_popularity_raw, total_causal_items, args.save_dir)
+    
+    # GRAPH 2b: Local Tracing Boxplot
+    plot_local_causal_tracing_box(graph2_data, module_names, total_causal_items, args.save_dir)
 
 if __name__ == '__main__':
     main()
