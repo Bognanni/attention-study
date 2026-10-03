@@ -127,8 +127,8 @@ def plot_local_causal_tracing_box(graph2_data, module_names, total_causal_items,
     fig, ax = plt.subplots(figsize=(10, 6))
     data = [graph2_data[m] for m in module_names]
     
-    # Create boxplot
-    bp = ax.boxplot(data, patch_artist=True, showmeans=True)
+    # Create boxplot without showing extreme outliers to preserve the y-axis scale
+    bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=False)
     
     # Style it
     for box in bp['boxes']:
