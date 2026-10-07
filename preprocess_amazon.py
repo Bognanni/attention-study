@@ -7,7 +7,7 @@ from pathlib import Path
 import gzip
 
 # Config
-# Link to the dataset: https://jmcauley.ucsd.edu/data/amazon_v2/categoryFilesSmall/Video_Games_5.json.gz
+# Link to the all the datasets (2018): https://cseweb.ucsd.edu/~jmcauley/datasets/amazon_v2/
 INPUT_FILE = "reviews_Video_Games_5.json.gz"
 OUTPUT_DIR = Path("datasets/video_games")
 # Since the file is ALREADY 5-core filtered from the website, we can just leave this as a safety check

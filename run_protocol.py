@@ -31,7 +31,7 @@ def main():
     device = get_device()
     
     model = build_model(config).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
     model.eval()
     
     pad_token_id = model.num_items + 1
@@ -65,6 +65,7 @@ def main():
     causal_popularity_count = {}
     causal_popularity_raw = []
     causal_positions_raw = []
+    all_prob_drop_ratios = []
 
     # Phase 1 Metrics Storage
     spearman_scores, jaccard_scores = [], []
@@ -83,10 +84,11 @@ def main():
         rollout_matrix = compute_attention_rollout(attentions)
         rollout_scores = rollout_matrix[0, -1, :] # Score from target position
         
-        causal_drops, is_highly_causal, valid_idx = FaithfulnessEvaluator.compute_loo_ablation(
+        causal_drops, is_highly_causal, valid_idx, prob_drop_ratios = FaithfulnessEvaluator.compute_loo_ablation(
             model, input_seq, target_item, pad_token_id
         )
         valid_idx_np = valid_idx.cpu().numpy()
+        all_prob_drop_ratios.extend(prob_drop_ratios[valid_idx].cpu().numpy().tolist())
         
         spearman = FaithfulnessEvaluator.compute_spearman(rollout_scores, causal_drops, valid_idx)
         jaccard = FaithfulnessEvaluator.compute_jaccard(rollout_scores, causal_drops, valid_idx, k=3)
@@ -161,6 +163,24 @@ def main():
     print(f"Average Top-3 Jaccard: {np.mean(jaccard_scores):.4f}")
     print(f"\n[Attention Rollout] Comp@3: {np.mean(comp_scores):.4f} | Suff@3: {np.mean(suff_scores):.4f}")
     print(f"[Causal Baseline]   Comp@3: {np.mean(causal_comp_scores):.4f} | Suff@3: {np.mean(causal_suff_scores):.4f}")
+    
+    print("\n--- PHASE 1: PROBABILITY DROP PERCENTILES ---")
+    if all_prob_drop_ratios:
+        # Convert to percentages for readability
+        drops_pct = np.array(all_prob_drop_ratios) * 100
+        print(f"Total historical items ablated: {len(drops_pct)}")
+        print(f"  Mean drop: {np.mean(drops_pct):5.2f}%")
+        print(f"  Q1 (25%) : {np.percentile(drops_pct, 25):5.2f}%")
+        print(f"  Median   : {np.percentile(drops_pct, 50):5.2f}%")
+        print(f"  Q3 (75%) : {np.percentile(drops_pct, 75):5.2f}%")
+        print(f"  P90      : {np.percentile(drops_pct, 90):5.2f}%")
+        print(f"  P95      : {np.percentile(drops_pct, 95):5.2f}%")
+        print(f"  P99      : {np.percentile(drops_pct, 99):5.2f}%")
+        print(f"  Max drop : {np.max(drops_pct):5.2f}%")
+        
+        # Calculate how many actually crossed the 50% threshold
+        num_highly_causal = np.sum(drops_pct > 50.0)
+        print(f"\nItems exceeding the 50% threshold: {num_highly_causal} ({num_highly_causal/len(drops_pct)*100:.2f}%)")
 
     print("\n--- CAUSAL POPULARITY RESULTS ---")
     if total_causal_items > 0:

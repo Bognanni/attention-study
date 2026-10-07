@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import pandas as pd
 import os
 from scipy.stats import spearmanr
 
@@ -109,12 +110,13 @@ class FaithfulnessEvaluator:
     def compute_loo_ablation(model, input_seq, target_item, pad_token_id):
         """
         Leave-One-Out (LOO) Input Ablation.
-        Returns the causal drops (using logits) and a boolean mask of highly causal items
-        (using Softmax Probability drop > 50%).
+        Returns the causal drops (using logits), a boolean mask of highly causal items
+        (using Softmax Probability drop > 50%), and the raw prob_drop_ratios.
         """
         valid_idx = (input_seq != pad_token_id).nonzero(as_tuple=True)[0]
         causal_drops = torch.zeros(len(input_seq), device=input_seq.device)
         is_highly_causal = torch.zeros(len(input_seq), dtype=torch.bool, device=input_seq.device)
+        prob_drop_ratios = torch.zeros(len(input_seq), dtype=torch.float32, device=input_seq.device)
         
         seq_2d = input_seq.unsqueeze(0)
         with torch.no_grad():
@@ -144,10 +146,12 @@ class FaithfulnessEvaluator:
             
             # Probability drop for identifying "Vital/Highly Causal" items (for the second part)
             prob_drop_ratio = (base_prob - ablated_prob) / base_prob if base_prob > 0 else 0
+            prob_drop_ratios[idx] = prob_drop_ratio
+            
             if prob_drop_ratio > 0.50:
                 is_highly_causal[idx] = True
                 
-        return causal_drops, is_highly_causal, valid_idx
+        return causal_drops, is_highly_causal, valid_idx, prob_drop_ratios
 
 def calculate_popularity_baseline(dataset_name, head_percentage=0.20):
     """
@@ -213,3 +217,32 @@ def get_item_popularity_bins(dataset_name):
             
         return item_to_bin, item_to_percentile
     return {}, {}
+
+
+def compute_user_overlap(categories=["Video_Games", "Toys_and_Games", "Electronics"]):
+    """
+    Computes the overlap of users between different Amazon categories (2023).
+    """
+
+    user_sets = {}
+
+    for cat in categories:
+        url = f"https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/benchmark/0core/rating_only/{cat}.csv.gz"
+        df = pd.read_csv(url, usecols=["user_id"])
+        user_sets[cat] = set(df["user_id"].unique())
+        print(f"{cat}: {len(user_sets[cat]):,} unique users")
+
+    # Compute the overlap between each pair of categories
+    for i in range(len(categories)):
+        for j in range(i + 1, len(categories)):
+            c1, c2 = categories[i], categories[j]
+            u1, u2 = user_sets[c1], user_sets[c2]
+            inter = len(u1 & u2)
+            jaccard = inter / len(u1 | u2) * 100
+            containment = inter / min(len(u1), len(u2)) * 100
+            print(
+                f"\nOverlap {c1} <-> {c2}: {inter:,} shared users | Jaccard:"
+                f" {jaccard:.2f}% | On smaller set: {containment:.2f}%"
+            )
+
+# compute_user_overlap()
