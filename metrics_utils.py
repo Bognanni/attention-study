@@ -156,7 +156,8 @@ class FaithfulnessEvaluator:
 def calculate_popularity_baseline(dataset_name, head_percentage=0.20):
     """
     Computes the popularity baseline for the dataset.
-    Returns the set of head items and the ratio of interactions they account for."""
+    Returns the set of head items and the ratio of interactions they account for.
+    """
     train_file = f"datasets/{dataset_name}/train/input.txt"
     item_counts = {}
     total_train_interactions = 0
@@ -244,5 +245,19 @@ def compute_user_overlap(categories=["Video_Games", "Toys_and_Games", "Electroni
                 f"\nOverlap {c1} <-> {c2}: {inter:,} shared users | Jaccard:"
                 f" {jaccard:.2f}% | On smaller set: {containment:.2f}%"
             )
+            
+    # Compute the global overlap across ALL categories
+    if len(categories) > 2:
+        all_intersection = set.intersection(*user_sets.values())
+        all_union = set.union(*user_sets.values())
+        min_set_size = min(len(u) for u in user_sets.values())
+        
+        global_inter = len(all_intersection)
+        global_jaccard = (global_inter / len(all_union)) * 100
+        global_containment = (global_inter / min_set_size) * 100
+        
+        cats_str = " <-> ".join(categories)
+        print(f"\n[GLOBAL OVERLAP] {cats_str}")
+        print(f"  Users present in ALL datasets: {global_inter:,} | Global Jaccard: {global_jaccard:.2f}% | On smallest set: {global_containment:.2f}%")
 
 # compute_user_overlap()
