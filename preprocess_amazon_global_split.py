@@ -25,7 +25,10 @@ ALL_AMAZON_2023_CATEGORIES = [
 BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/benchmark/0core/rating_only"
 
 def download_category_if_needed(category, cache_dir):
-    """Downloads a category csv.gz file if not already present in cache_dir."""
+    """
+    Downloads a category csv.gz file if not already in cache_dir.
+    Returns: the path to the cached file.
+    """
     cache_path = cache_dir / f"{category}.csv.gz"
     if cache_path.exists() and cache_path.stat().st_size > 0:
         return cache_path
@@ -176,7 +179,8 @@ def calibrate_timeline(interactions, t_end, test_days=7, val_days=5, target_warm
     
     return t_start, t_val, t_test, t_end, best_ratio
 
-def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, output_dir, min_seq_len=2, max_seq_len=50):
+def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, output_dir, 
+                               min_freq_warm=2, min_user_core=2, max_seq_len=50):
     """
     Constructs train, val, test sequences according to Option A and writes them
     in standard format:
@@ -200,27 +204,51 @@ def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, outp
         user_timeline[u].sort(key=lambda x: x[0])
 
     # 2. Extract train interactions up to T_val to build catalog vocabulary
-    all_train_items = set()
-    train_user_items = {}
+    train_item_counts = Counter()
     for u, history in user_timeline.items():
-        # Collect all items interacted in the training window [t_start, t_val]
         for t, i in history:
             if t_start <= t < t_val:
-                all_train_items.add(i)
+                train_item_counts[i] += 1
 
-    # Assign 1-indexed contiguous integer IDs
-    item_map = {item: idx + 1 for idx, item in enumerate(sorted(all_train_items))}
+    # Keep ONLY warm items in catalog vocabulary (frequency >= min_freq_warm in train)
+    warm_catalog_items = {item for item, c in train_item_counts.items() if c >= min_freq_warm}
+    
+    print("\n" + "="*70)
+    print(f"CATALOG FILTERING (WARM THRESHOLD: >= {min_freq_warm} APPEARANCES IN TRAIN)")
+    print(f"  • Raw items seen in train window: {len(train_item_counts):,}")
+    print(f"  • Filtered Warm Catalog items:    {len(warm_catalog_items):,} ({(len(warm_catalog_items)/max(1, len(train_item_counts)))*100:.2f}%)")
+    print("="*70)
 
-    # For train sequences: keep user history up to T_val
+    # Assign 1-indexed contiguous integer IDs to warm items only
+    item_map = {item: idx + 1 for idx, item in enumerate(sorted(warm_catalog_items))}
+
+    # Sequence length breakdown before filtering
+    candidate_train_lengths = []
+    for u, history in user_timeline.items():
+        active = any(t_start <= t < t_val for t, i in history)
+        if active:
+            past = [item_map[i] for t, i in history if t < t_val and i in item_map]
+            if len(past) > 0:
+                candidate_train_lengths.append(len(past))
+
+    print("\n" + "="*70)
+    print("USER SEQUENCE LENGTH BREAKDOWN (K-CORE POTENTIAL)")
+    for core in [1, 2, 3, 5, 10]:
+        c_count = sum(1 for l in candidate_train_lengths if l >= core)
+        pct = (c_count / max(1, len(candidate_train_lengths))) * 100
+        print(f"  • {core}-core (sequence length >= {core}): {c_count:>8,} sequences ({pct:.1f}%)")
+    print(f"Selected sequence length threshold (min_user_core): >= {min_user_core}")
+    print("="*70 + "\n")
+
+    # 3. For train sequences: keep user history up to T_val
+    train_user_items = {}
     for u, history in user_timeline.items():
         past = [item_map[i] for t, i in history if t < t_val and i in item_map]
         active_in_train = any(t_start <= t < t_val for t, i in history)
-        if len(past) >= min_seq_len and active_in_train:
+        if len(past) >= min_user_core and active_in_train:
             train_user_items[u] = past[-max_seq_len:]
 
     user_map = {user: idx + 1 for idx, user in enumerate(sorted(train_user_items.keys()))}
-
-    # 3. Build Train Set
     train_sequences = list(train_user_items.values())
 
     # 4. Build Validation Set:
@@ -230,7 +258,7 @@ def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, outp
         past_items = [item_map[i] for t, i in history if t < t_val and i in item_map]
         future_events = [(t, i) for t, i in history if t_val < t <= t_test]
         
-        if len(past_items) >= min_seq_len and len(future_events) > 0:
+        if len(past_items) >= min_user_core and len(future_events) > 0:
             true_first_future_item = future_events[0][1] # The true first item after split
             if true_first_future_item in item_map:
                 val_inputs.append(past_items[-max_seq_len:])
@@ -243,7 +271,7 @@ def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, outp
         past_items = [item_map[i] for t, i in history if t < t_test and i in item_map]
         future_events = [(t, i) for t, i in history if t_test < t <= t_end]
         
-        if len(past_items) >= min_seq_len and len(future_events) > 0:
+        if len(past_items) >= min_user_core and len(future_events) > 0:
             true_first_future_item = future_events[0][1] # The true first item after split
             if true_first_future_item in item_map:
                 test_inputs.append(past_items[-max_seq_len:])
@@ -275,6 +303,8 @@ def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, outp
         "num_train_sequences": len(train_sequences),
         "num_val_samples": len(val_inputs),
         "num_test_samples": len(test_inputs),
+        "min_freq_warm": min_freq_warm,
+        "min_user_core": min_user_core,
         "t_start": t_start,
         "t_val": t_val,
         "t_test": t_test,
@@ -295,18 +325,20 @@ def build_sequences_and_export(interactions, t_start, t_val, t_test, t_end, outp
 
 def main():
     parser = argparse.ArgumentParser(description="Global Timeline Split for Amazon 2023 (Petrov & Macdonald, RecSys '22)")
-    parser.add_argument("--categories", nargs="+", default=["All_Beauty"], 
+    parser.add_argument("--categories", nargs="+", default=["All_Beauty"],
                         help="List of Amazon 2023 categories to include or 'all' for all 34 categories.")
     parser.add_argument("--local_file", type=str, default=None,
                         help="Optional direct path to a local CSV or JSONL file (e.g. All_Beauty.jsonl/All_Beauty.jsonl).")
     parser.add_argument("--cache_dir", type=str, default="raw_amazon_2023",
-                        help="Local cache directory for raw files.")
+                        help="Local cache directory for downloaded raw files.")
     parser.add_argument("--output_dir", type=str, default="datasets/amazon_gts",
                         help="Destination directory for processed dataset.")
     parser.add_argument("--target_warm_ratio", type=float, default=0.80,
                         help="Target fraction of warm items in test ground truth (default: 0.80).")
     parser.add_argument("--min_freq_warm", type=int, default=5,
-                        help="Minimum training appearances to consider an item warm (default: 5).")
+                        help="Minimum training appearances to consider an item warm and include it in catalog (default: 5).")
+    parser.add_argument("--min_user_core", type=int, default=5,
+                        help="Minimum sequence length per user (e.g. 1 for 0-core, 2 for next-item, 5 for 5-core). Default: 5.")
     parser.add_argument("--val_days", type=int, default=5,
                         help="Duration of the validation window in days (default: 5).")
     parser.add_argument("--test_days", type=int, default=7,
@@ -318,7 +350,7 @@ def main():
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Determine files to read
+    # Determine files to read
     files_to_process = []
     if args.local_file and os.path.exists(args.local_file):
         files_to_process.append(Path(args.local_file))
@@ -332,20 +364,11 @@ def main():
             else:
                 files_to_process.append(download_category_if_needed(c, cache_dir))
 
-    # 2. Determine global max timestamp if not supplied
-    t_end = args.t_end
-    if t_end is None:
-        print("Scanning files to detect maximum dataset timestamp...")
-        max_seen = float("-inf")
-        for f in files_to_process:
-            # Sample or scan tail for maximum timestamp
-            # Default to September 9, 2023 (~1694227200) as upper bound if detection completes
-            sample = stream_interactions_in_window(f, 0, float("inf"))
-            if sample:
-                max_in_file = max(t for _, _, t in sample)
-                if max_in_file > max_seen:
-                    max_seen = max_in_file
-        t_end = max_seen if max_seen > 0 else 1694227200.0
+    # 2. Determine global max timestamp (Amazon 2023 benchmark cutoff is 2023-09-09)
+    # 1694227200.0 corresponds to 2023-09-09 00:00:00 UTC
+    DEFAULT_AMAZON_2023_END = 1694227200.0
+    t_end = args.t_end if args.t_end is not None else DEFAULT_AMAZON_2023_END
+    print(f"Using reference end timestamp: {t_end} ({datetime.fromtimestamp(t_end, tz=timezone.utc)})")
 
     # Look back up to 180 days from t_end to keep memory footprint minimal during calibration
     candidate_window_start = t_end - (180 * 86400)
@@ -379,7 +402,9 @@ def main():
         t_val=t_val,
         t_test=t_test,
         t_end=t_end,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        min_freq_warm=args.min_freq_warm,
+        min_user_core=args.min_user_core
     )
 
 if __name__ == "__main__":
