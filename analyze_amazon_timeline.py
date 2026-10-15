@@ -183,10 +183,6 @@ def analyze_timeline(interactions, t_end, test_days=15, max_train_days=360, step
         print(row)
 
     print("="*125 + "\n")
-    print("TIPS FOR SELECTION:")
-    print("  • Inspect the Warm Ratio plateau to detect when adding more days brings diminishing returns.")
-    print("  • Check the 5-Core volume: ensure you have enough training sequences (e.g. >= 50,000) for stable SASRec attention.")
-    print("  • To generate the dataset with your chosen duration and core, run 'build_amazon_gts_dataset.py'.\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Exploratory Timeline Analysis for Amazon 2023 (Global Timeline Split)")

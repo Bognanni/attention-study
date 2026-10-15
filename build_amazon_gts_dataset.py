@@ -283,8 +283,8 @@ def build_and_export_dataset(
     print(f"  • Items in catalog vocabulary: {stats['num_items']:,}")
     print(f"  • Training sequences:         {stats['num_train_sequences']:,}")
     print(f"  • Training interactions:      {stats['num_train_interactions']:,} (avg length: {stats['avg_train_seq_len']})")
-    print(f"  • Validation evaluation pairs: {stats['num_val_samples']:,}")
-    print(f"  • Test evaluation pairs:       {stats['num_test_samples']:,}")
+    print(f"  • Validation evaluation samples: {stats['num_val_samples']:,}")
+    print(f"  • Test evaluation samples:       {stats['num_test_samples']:,}")
     print("="*80 + "\n")
 
 def main():
