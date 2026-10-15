@@ -138,13 +138,13 @@ def calibrate_timeline(interactions, t_end, test_days=7, target_warm_ratio=0.80,
         print("WARNING: No users with past history found in the test window for this subset.")
         return t_split - (30 * day_sec), t_split, t_end, 0.0
 
-    # Try different train durations (e.g., 20, 30, 45, 60, 90, 120 days)
-    candidate_train_days = [20, 30, 45, 60, 90, 120]
+    # Try different train durations (starting from 30 days and adding 30 days at a time)
+    candidate_train_days = [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
     best_train_days = candidate_train_days[0]
     best_ratio = 0.0
 
-    print(f"{'Train Days':<12} | {'Train Inters':<14} | {'% Train':<9} | {'% Test':<8} | {'Warm Ratio':<12} | {'Warm Targets':<14} | {'Test Targets'}")
-    print("-" * 90)
+    print(f"{'Train Days':<12} | {'Train Inters':<14} | {'% Train':<9} | {'% Test':<8} | {'Warm Ratio':<12} | {'5-Core Users':<14} | {'Test Targets'}")
+    print("-" * 105)
     
     for days in candidate_train_days:
         t_start_candidate = t_split - (days * day_sec)
@@ -162,7 +162,14 @@ def calibrate_timeline(interactions, t_end, test_days=7, target_warm_ratio=0.80,
         warm_count = sum(1 for item in test_targets if item in warm_items)
         ratio = warm_count / total_test_targets
         
-        print(f"{str(days) + ' days':<12} | {train_inters:>14,} | {pct_train:>8.2f}% | {pct_test:>7.2f}% | {ratio*100:>10.2f}% | {warm_count:>14,} | {total_test_targets:,}")
+        # User 5-core count strictly in [t_start_candidate, t_split)
+        user_counts = Counter()
+        for u, i, t in interactions:
+            if t_start_candidate <= t < t_split and i in warm_items:
+                user_counts[u] += 1
+        num_5core = sum(1 for c in user_counts.values() if c >= 5)
+
+        print(f"{str(days) + ' days':<12} | {train_inters:>14,} | {pct_train:>8.2f}% | {pct_test:>7.2f}% | {ratio*100:>10.2f}% | {num_5core:>14,} | {total_test_targets:,}")
         
         if ratio >= target_warm_ratio:
             best_train_days = days
@@ -224,17 +231,15 @@ def build_sequences_and_export(interactions, t_start, t_split, t_end, output_dir
     # Assign 1-indexed contiguous integer IDs to warm items only
     item_map = {item: idx + 1 for idx, item in enumerate(sorted(warm_catalog_items))}
 
-    # Sequence length breakdown before filtering
+    # Sequence length breakdown strictly within [t_start, t_split)
     candidate_train_lengths = []
     for u, history in user_timeline.items():
-        active = any(t_start <= t < t_split for t, i in history)
-        if active:
-            past = [item_map[i] for t, i in history if t < t_split and i in item_map]
-            if len(past) > 0:
-                candidate_train_lengths.append(len(past))
+        past = [item_map[i] for t, i in history if t_start <= t < t_split and i in item_map]
+        if len(past) > 0:
+            candidate_train_lengths.append(len(past))
 
     print("\n" + "="*70)
-    print("USER SEQUENCE LENGTH BREAKDOWN (K-CORE POTENTIAL)")
+    print("USER SEQUENCE LENGTH BREAKDOWN IN FIXED WINDOW [T_start, T_split) (K-CORE POTENTIAL)")
     for core in [1, 2, 3, 5, 10]:
         c_count = sum(1 for l in candidate_train_lengths if l >= core)
         pct = (c_count / max(1, len(candidate_train_lengths))) * 100
@@ -243,10 +248,10 @@ def build_sequences_and_export(interactions, t_start, t_split, t_end, output_dir
     print("="*70 + "\n")
 
     # 3. Build Test Set:
-    # History before T_split as input; TRUE first item in (T_split, t_end] as target
+    # History strictly in [T_start, T_split) as input; TRUE first item in (T_split, t_end] as target
     test_inputs, test_outputs = [], []
     for u, history in user_timeline.items():
-        past_items = [item_map[i] for t, i in history if t < t_split and i in item_map]
+        past_items = [item_map[i] for t, i in history if t_start <= t < t_split and i in item_map]
         future_events = [(t, i) for t, i in history if t_split < t <= t_end]
         
         if len(past_items) >= min_user_core and len(future_events) > 0:
@@ -256,12 +261,11 @@ def build_sequences_and_export(interactions, t_start, t_split, t_end, output_dir
                 test_outputs.append(item_map[true_first_future_item])
 
     # 4. Build Train and Validation Sets:
-    # Extract candidate training users
+    # Extract candidate training users strictly in [T_start, T_split)
     all_train_candidates = {}
     for u, history in user_timeline.items():
-        past = [item_map[i] for t, i in history if t < t_split and i in item_map]
-        active_in_train = any(t_start <= t < t_split for t, i in history)
-        if len(past) >= min_user_core and active_in_train:
+        past = [item_map[i] for t, i in history if t_start <= t < t_split and i in item_map]
+        if len(past) >= min_user_core:
             all_train_candidates[u] = past
 
     # Select validation users from training users (requiring >= 2 items so seq[:-1] is valid)
@@ -306,10 +310,13 @@ def build_sequences_and_export(interactions, t_start, t_split, t_end, output_dir
         for target in test_outputs:
             f.write(str(target) + "\n")
 
+    num_train_interactions = sum(len(seq) for seq in train_sequences)
     stats = {
         "num_users": len(user_map),
         "num_items": len(item_map),
         "num_train_sequences": len(train_sequences),
+        "num_train_interactions": num_train_interactions,
+        "avg_train_seq_len": round(num_train_interactions / max(1, len(train_sequences)), 2),
         "num_val_samples": len(val_inputs),
         "num_test_samples": len(test_inputs),
         "min_freq_warm": min_freq_warm,
@@ -327,6 +334,7 @@ def build_sequences_and_export(interactions, t_start, t_split, t_end, output_dir
     print(f"\n[DONE] Global Timeline Split successfully written to: {output_dir}")
     print(f"  • Items in catalog vocabulary: {stats['num_items']:,}")
     print(f"  • Training sequences:         {stats['num_train_sequences']:,}")
+    print(f"  • Training interactions:      {stats['num_train_interactions']:,} (avg length: {stats['avg_train_seq_len']})")
     print(f"  • Validation evaluation pairs: {stats['num_val_samples']:,}")
     print(f"  • Test evaluation pairs:       {stats['num_test_samples']:,}")
 
@@ -377,8 +385,8 @@ def main():
     t_end = args.t_end if args.t_end is not None else DEFAULT_AMAZON_2023_END
     print(f"Using reference end timestamp: {t_end} ({datetime.fromtimestamp(t_end, tz=timezone.utc)})")
 
-    # Look back up to 180 days from t_end to keep memory footprint minimal during calibration
-    candidate_window_start = t_end - (180 * 86400)
+    # Look back up to 360 days from t_end to keep memory footprint minimal during calibration
+    candidate_window_start = t_end - (360 * 86400)
     print(f"Loading candidate interactions from {len(files_to_process)} source(s) in window [{candidate_window_start}, {t_end}]...")
     
     all_interactions = []
