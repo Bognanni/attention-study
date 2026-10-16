@@ -34,7 +34,10 @@ step = 0
 steps_not_improved = 0
 
 model = model.to(device)
-summary(model, (config.train_batch_size, config.sequence_length), batch_dim=None)
+try:
+    summary(model, (config.train_batch_size, config.sequence_length), batch_dim=None)
+except Exception:
+    pass
 
 for epoch in range(config.max_epochs):
     model.train()   
@@ -94,3 +97,5 @@ for epoch in range(config.max_epochs):
         if steps_not_improved >= config.early_stopping_patience:
             print(f"Stopping training, best model was saved to {best_model_name}")
             break
+
+print(f"FINAL_SCORE_FOR_OPTUNA: {best_metric}")
