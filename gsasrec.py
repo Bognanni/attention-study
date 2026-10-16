@@ -29,6 +29,24 @@ class GSASRec(torch.nn.Module):
         else:
             return self.output_embedding
 
+    def disable_layer_ffn(self, layer_idx=1):
+        """
+        Disables the feed-forward network (FFN) of the specified transformer block.
+        """
+        if 0 <= layer_idx < len(self.transformer_blocks):
+            self.transformer_blocks[layer_idx].disable_ffn = True
+        else:
+            raise IndexError(f"Layer index {layer_idx} out of range (model has {len(self.transformer_blocks)} blocks)")
+
+    def enable_layer_ffn(self, layer_idx=1):
+        """
+        Enables the feed-forward network (FFN) of the specified transformer block.
+        """
+        if 0 <= layer_idx < len(self.transformer_blocks):
+            self.transformer_blocks[layer_idx].disable_ffn = False
+        else:
+            raise IndexError(f"Layer index {layer_idx} out of range (model has {len(self.transformer_blocks)} blocks)")
+
     #returns last hidden state and the attention weights
     def forward(self, input):
         seq = self.item_embedding(input.long())

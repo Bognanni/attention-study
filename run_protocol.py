@@ -24,7 +24,13 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--save_dir', type=str, default='protocol_plots')
     parser.add_argument('--num_samples', type=int, default=100, help="Number of sequences to process")
+    parser.add_argument('--disable_ffn_layers', type=int, nargs='*', default=[], help="Indices of Transformer layers to disable FFN for (e.g. --disable_ffn_layers 0 1)")
+    parser.add_argument('--disable_l1_ffn', action='store_true', help="Convenience alias to disable Layer 1 FFN")
     args = parser.parse_args()
+
+    disabled_layers = list(args.disable_ffn_layers)
+    if args.disable_l1_ffn and 1 not in disabled_layers:
+        disabled_layers.append(1)
 
     os.makedirs(args.save_dir, exist_ok=True)
     config = load_config(args.config)
@@ -33,6 +39,11 @@ def main():
     model = build_model(config).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
     model.eval()
+
+    if disabled_layers:
+        for layer_idx in disabled_layers:
+            model.disable_layer_ffn(layer_idx)
+        print(f"[INFO] FFN DISABLED for layers: {disabled_layers}")
     
     pad_token_id = model.num_items + 1
     test_dataloader = get_test_dataloader(config.dataset_name, batch_size=args.num_samples, max_length=config.sequence_length)

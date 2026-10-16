@@ -65,7 +65,8 @@ class ActivationPatcher:
         modules = {}
         for l, block in enumerate(self.model.transformer_blocks):
             modules[f'L{l}_MHA'] = block.multihead_attention
-            modules[f'L{l}_FFN'] = block.dense2
+            if not getattr(block, 'disable_ffn', False):
+                modules[f'L{l}_FFN'] = block.dense2
             modules[f'L{l}_Residual'] = block
         return modules
 

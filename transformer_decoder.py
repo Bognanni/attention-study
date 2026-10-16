@@ -90,6 +90,7 @@ class TransformerBlock(nn.Module):
         
         self.dropout = nn.Dropout(dropout_rate)
         self.causality = causality
+        self.disable_ffn = False
         
     def forward(self, seq, mask=None):
         x = self.first_norm(seq)
@@ -102,15 +103,14 @@ class TransformerBlock(nn.Module):
         x = self.second_norm(x)
         
         # Feed Forward
-        residual = x
-        x = self.dense1(x)
-        x = F.relu(x)
-        x = self.dropout(x)
-        x = self.dense2(x)
-        x = self.dropout(x)
-        
-        # Add & Norm
-        x = x + residual
+        if not self.disable_ffn:
+            residual = x
+            x = self.dense1(x)
+            x = F.relu(x)
+            x = self.dropout(x)
+            x = self.dense2(x)
+            x = self.dropout(x)
+            x = x + residual
         
         # Apply mask if provided
         if mask is not None:

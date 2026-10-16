@@ -31,3 +31,7 @@ models
 # deliverables
 notes.md
 summary.md
+
+# extra code
+verify_amazon_gts.py
+check_relu.py
