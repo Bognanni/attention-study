@@ -11,6 +11,7 @@ __pycache__/
 
 # Datasets
 datasets/
+hpo_db/
 
 # My Models
 my_models/

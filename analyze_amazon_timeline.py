@@ -25,6 +25,10 @@ ALL_AMAZON_2023_CATEGORIES = [
 BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/benchmark/0core/rating_only"
 
 def download_category_if_needed(category, cache_dir):
+    """
+    Downloads the specified Amazon 2023 category file if it doesn't exist in the cache directory.
+    Returns the path to the cached file.
+    """
     cache_path = cache_dir / f"{category}.csv.gz"
     if cache_path.exists() and cache_path.stat().st_size > 0:
         return cache_path
