@@ -12,8 +12,15 @@ def load_config(config_file: str) -> GSASRecExperimentConfig:
 
 def build_model(config: GSASRecExperimentConfig):
     num_items = get_num_items(config.dataset_name) 
-    model = GSASRec(num_items, sequence_length=config.sequence_length, embedding_dim=config.embedding_dim,
-                        num_heads=config.num_heads, num_blocks=config.num_blocks, dropout_rate=config.dropout_rate)
+    model = GSASRec(
+        num_items, 
+        sequence_length=config.sequence_length, 
+        embedding_dim=config.embedding_dim,
+        num_heads=config.num_heads, 
+        num_blocks=config.num_blocks, 
+        dropout_rate=config.dropout_rate,
+        reuse_item_embeddings=config.reuse_item_embeddings
+    )
     return model
 
 def get_device():
