@@ -11,30 +11,34 @@ from optuna.samplers import GridSampler
 # ==============================================================================
 # HYPERPARAMETER GRID DEFINITIONS (EXHAUSTIVE SEARCH SPACE)
 # ==============================================================================
-# The Cartesian product across all parameters is tested systematically.
-# Fixed architectural constants and defaults are kept consistent with config.py.
+# Option 2 applied for gSASRec: 16 combinations (evaluating 64 vs 128 embedding,
+# 0.3 vs 0.5 dropout, 128 vs 256 negatives, and 0.5 vs 0.75 G-BCE temperature).
+# Fixed architectural constants are validated from prior empirical runs.
 # ==============================================================================
 
 DEFAULT_GRID_SASREC = {
-    'dropout_rate': [0.3, 0.5, 0.7],
-    'embedding_dim': [64, 128],
-    'num_blocks': [1, 2],
-    'num_heads': [1, 2],
-    'sequence_length': [50],
-    'train_batch_size': [128],
+    'dropout_rate': [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],  # Broad dropout scale (6 values)
+    'embedding_dim': [64, 128],                      # Capacity comparison (2 values)
+    'num_blocks': [2],                               # Fixed to proven optimum
+    'num_heads': [1],                                # Fixed to standard 1 head
+    'sequence_length': [50],                         # Fixed for Amazon GTS
+    'train_batch_size': [128],                       # Fixed batch size
 }
 
 DEFAULT_GRID_GSASREC = {
-    'gbce_t': [0.25, 0.75],
-    'negs_per_pos': [64, 256],
-    'dropout_rate': [0.3, 0.5],
-    'embedding_dim': [64, 128],
-    'num_heads': [1],
+    'embedding_dim': [64, 128],                      # 64 vs 128 dimensions (2 values)
+    'dropout_rate': [0.3, 0.5],                      # 0.3 vs 0.5 dropout (2 values)
+    'negs_per_pos': [128, 256],                      # 128 vs 256 negatives (2 values)
+    'gbce_t': [0.5, 0.75],                           # SOTA calibration temperatures (2 values)
+    'num_blocks': [2],                               # Fixed to proven optimum
+    'num_heads': [1],                                # Fixed to standard 1 head
+    'sequence_length': [50],                         # Fixed for Amazon GTS
+    'train_batch_size': [128],                       # Fixed batch size
 }
 
 # Configuration template passed dynamically to train_gsasrec.py
-# Uses default validation metric (nDCG@10), cutoff, and metric list defined in config.py
 TEMPLATE_CONFIG = """from config import GSASRecExperimentConfig
+from ir_measures import R, nDCG
 
 config = GSASRecExperimentConfig(
     dataset_name='{dataset_name}',
@@ -50,8 +54,15 @@ config = GSASRecExperimentConfig(
     negs_per_pos={negs_per_pos},
     gbce_t={gbce_t},
     reuse_item_embeddings=False,
+    recommendation_limit=50,
+    val_metric=R@50,
+    metrics=[R@50, nDCG@50, nDCG@10, R@10, R@1],
 )
 """
+
+# Dynamically extract target validation metric from TEMPLATE_CONFIG to avoid hardcoded metric strings
+val_metric_match = re.search(r'val_metric\s*=\s*([^,\n]+)', TEMPLATE_CONFIG)
+TARGET_METRIC_LABEL = val_metric_match.group(1).strip() if val_metric_match else "Validation Metric"
 
 
 class BestCheckpointManager:
@@ -122,18 +133,14 @@ def create_objective(args, grid, total_combinations, checkpoint_manager):
     Build the objective function for Exhaustive Grid Search.
     """
 
-    # Fixed parameters outside the respective search grid
+    # Fixed parameters outside the respective search grid (if any)
     if args.model_type == 'sasrec':
         fixed_params = {
             'gbce_t': 0.0,
             'negs_per_pos': 1,
         }
     else:  # gsasrec
-        fixed_params = {
-            'sequence_length': 50,
-            'num_blocks': 2,
-            'train_batch_size': 128,
-        }
+        fixed_params = {}
 
     def objective(trial):
         # Sample the exact combination assigned by GridSampler
@@ -218,7 +225,7 @@ def create_objective(args, grid, total_combinations, checkpoint_manager):
         match = re.search(r'FINAL_SCORE_FOR_OPTUNA:\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)', output_text)
         if match:
             score = float(match.group(1))
-            print(f"[Grid Trial {trial_idx}] Success -> Validation Score (nDCG@10): {score:.6f}")
+            print(f"[Grid Trial {trial_idx}] Success -> Validation Score: {score:.6f}")
         else:
             # Fallback: search for metric in saved checkpoint logs
             metric_matches = re.findall(r'metric_([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\.pt', output_text)
@@ -260,13 +267,13 @@ def print_leaderboard(study, top_n=15):
     print("\n" + "=" * 80)
     print(f"GRID SEARCH LEADERBOARD (Top {min(top_n, len(sorted_trials))} of {len(sorted_trials)} completed)")
     print("=" * 80)
-    print(f"{'Rank':<4} | {'Trial':<6} | {'Score (nDCG@10)':<16} | Hyperparameters")
+    print(f"{'Rank':<4} | {'Trial':<6} | {'Val Score':<12} | Hyperparameters")
     print("-" * 80)
 
     for rank, trial in enumerate(sorted_trials[:top_n], start=1):
         params_str = ", ".join(f"{k}={v}" for k, v in trial.params.items())
         val_str = f"{trial.value:.6f}"
-        print(f"#{rank:<3} | #{trial.number:<5} | {val_str:<16} | {params_str}")
+        print(f"#{rank:<3} | #{trial.number:<5} | {val_str:<12} | {params_str}")
 
     print("=" * 80)
 
@@ -295,8 +302,8 @@ def main():
     )
     parser.add_argument('--dataset', type=str, default='amazon_gts',
                         help="Target dataset name (default: amazon_gts)")
-    parser.add_argument('--model_type', type=str, default='sasrec', choices=['sasrec', 'gsasrec'],
-                        help="Model type: 'sasrec' or 'gsasrec' (default: sasrec)")
+    parser.add_argument('--model_type', type=str, default='gsasrec', choices=['sasrec', 'gsasrec'],
+                        help="Model type: 'sasrec' or 'gsasrec' (default: gsasrec)")
     parser.add_argument('--max_epochs', type=int, default=10000,
                         help="Maximum epochs per trial (default: 10000)")
     parser.add_argument('--patience', type=int, default=200,
@@ -338,7 +345,7 @@ def main():
         print(f"  * {k:22s} ({len(v)} values): {v}")
     print("-" * 80)
     print(f"Total Grid Combinations:   {total_combinations}")
-    print("Validation Metric:         nDCG@10 (default from config.py)")
+    print(f"Validation Metric:         {TARGET_METRIC_LABEL}")
     print(f"Max Epochs per Trial:     {args.max_epochs}")
     print(f"Early Stopping Patience:  {args.patience}")
     print(f"Persistent Database:      {args.storage}")
@@ -407,7 +414,7 @@ def main():
         best_trial = study.best_trial
         print(f"\nBEST OVERALL RESULT:")
         print(f"  * Best Trial:            #{best_trial.number}")
-        print(f"  * Validation Score:       {best_trial.value:.6f}")
+        print(f"  * Best Validation Score:  {best_trial.value:.6f}")
         print(f"  * Preserved Checkpoint:   {checkpoint_manager.best_checkpoint_path}")
         print("  * Best Hyperparameters:")
         for param, val in best_trial.params.items():

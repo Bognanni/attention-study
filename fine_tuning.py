@@ -6,7 +6,10 @@ import subprocess
 import sys
 
 
+# Configuration template passed dynamically to train_gsasrec.py
+# Configured with R@50 (Recall@50 / HitRatio@50) and recommendation_limit=50
 TEMPLATE_CONFIG = """from config import GSASRecExperimentConfig
+from ir_measures import R, nDCG
 
 config = GSASRecExperimentConfig(
     dataset_name='{dataset_name}',
@@ -22,8 +25,15 @@ config = GSASRecExperimentConfig(
     negs_per_pos={negs_per_pos},
     gbce_t={gbce_t},
     reuse_item_embeddings=False,
+    recommendation_limit=50,
+    val_metric=R@50,
+    metrics=[R@50, nDCG@50, nDCG@10, R@10, R@1],
 )
 """
+
+# Dynamically extract target validation metric from TEMPLATE_CONFIG to avoid hardcoded metric strings
+val_metric_match = re.search(r'val_metric\s*=\s*([^,\n]+)', TEMPLATE_CONFIG)
+TARGET_METRIC_LABEL = val_metric_match.group(1).strip() if val_metric_match else "Validation Metric"
 
 
 class BestCheckpointManager:
@@ -97,13 +107,13 @@ def print_leaderboard(study, top_n=15):
     print("\n" + "=" * 80)
     print(f"HYPERPARAMETER TUNING LEADERBOARD (Top {min(top_n, len(sorted_trials))} of {len(sorted_trials)} completed)")
     print("=" * 80)
-    print(f"{'Rank':<4} | {'Trial':<6} | {'Score (nDCG@10)':<16} | Hyperparameters")
+    print(f"{'Rank':<4} | {'Trial':<6} | {'Val Score':<12} | Hyperparameters")
     print("-" * 80)
 
     for rank, trial in enumerate(sorted_trials[:top_n], start=1):
         params_str = ", ".join(f"{k}={v}" for k, v in trial.params.items())
         val_str = f"{trial.value:.6f}"
-        print(f"#{rank:<3} | #{trial.number:<5} | {val_str:<16} | {params_str}")
+        print(f"#{rank:<3} | #{trial.number:<5} | {val_str:<12} | {params_str}")
 
     print("=" * 80)
 
@@ -114,25 +124,28 @@ def create_objective(args, checkpoint_manager):
             # Constants for gSASRec on sparse datasets
             sequence_length = 50
             num_blocks = 2
+            num_heads = 1
             train_batch_size = 128
 
             # Tune gSASRec specific & core parameters
-            gbce_t = trial.suggest_categorical('gbce_t', [0.25, 0.5, 0.75, 1.0])
-            negs_per_pos = trial.suggest_categorical('negs_per_pos', [64, 128, 256])
-            dropout_rate = trial.suggest_categorical('dropout_rate', [0.3, 0.4, 0.5])
+            gbce_t = trial.suggest_categorical('gbce_t', [0.5, 0.75])
+            negs_per_pos = trial.suggest_categorical('negs_per_pos', [128, 256])
+            dropout_rate = trial.suggest_categorical('dropout_rate', [0.3, 0.5])
             embedding_dim = trial.suggest_categorical('embedding_dim', [64, 128])
-            num_heads = trial.suggest_categorical('num_heads', [1, 2])
 
         else:  # sasrec
             gbce_t = 0.0
             negs_per_pos = 1
 
-            sequence_length = trial.suggest_categorical('sequence_length', [15, 30, 50])
+            # Fixed architectural constants based on empirical findings
+            sequence_length = 50
+            num_blocks = 2
+            num_heads = 1
+            train_batch_size = 128
+
+            # Tune key parameters across a broad dropout scale
             embedding_dim = trial.suggest_categorical('embedding_dim', [64, 128])
-            num_heads = trial.suggest_categorical('num_heads', [1, 2, 4])
-            num_blocks = trial.suggest_int('num_blocks', 1, 2)
-            dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.9, step=0.1)
-            train_batch_size = trial.suggest_categorical('train_batch_size', [64, 128])
+            dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.8, step=0.1)
 
         # Fill the configuration template
         generated_config = TEMPLATE_CONFIG.format(
@@ -156,14 +169,13 @@ def create_objective(args, checkpoint_manager):
         if args.model_type == 'gsasrec':
             print(
                 f"\n[Trial {trial.number}] Created {name_file_config} (GSASREC): "
-                f"t={gbce_t}, negs={negs_per_pos}, emb={embedding_dim}, drop={dropout_rate}, "
-                f"heads={num_heads}"
+                f"t={gbce_t}, negs={negs_per_pos}, emb={embedding_dim}, drop={dropout_rate:.1f}"
             )
         else:
             print(
                 f"\n[Trial {trial.number}] Created {name_file_config} (SASREC): "
-                f"seq_len={sequence_length}, emb={embedding_dim}, heads={num_heads}, "
-                f"blocks={num_blocks}, drop={dropout_rate:.1f}, batch={train_batch_size}"
+                f"emb={embedding_dim}, drop={dropout_rate:.1f}, blocks={num_blocks}, "
+                f"heads={num_heads}, batch={train_batch_size}"
             )
 
         # Run training subprocess with try...finally to ensure temporary config cleanup
@@ -196,7 +208,7 @@ def create_objective(args, checkpoint_manager):
         match = re.search(r'FINAL_SCORE_FOR_OPTUNA:\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)', output_text)
         if match:
             score = float(match.group(1))
-            print(f"[Trial {trial.number}] Success -> Validation Score (nDCG@10): {score:.6f}")
+            print(f"[Trial {trial.number}] Success -> Validation Score: {score:.6f}")
         else:
             # Fallback: search for metric in saved checkpoint logs
             metric_matches = re.findall(r'metric_([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\.pt', output_text)
@@ -244,6 +256,7 @@ def main():
 
     print("=" * 80)
     print(f"STARTING HPO FOR: {args.dataset.upper()} | MODEL: {args.model_type.upper()}")
+    print(f"Validation Metric:       {TARGET_METRIC_LABEL}")
     print(f"Trials: {args.n_trials} | Max Epochs: {args.max_epochs} | Patience: {args.patience}")
     print(f"Storage: {args.storage} | Study: {args.study_name}")
     print("=" * 80)
@@ -278,7 +291,7 @@ def main():
         best_trial = study.best_trial
         print(f"\nBEST OVERALL RESULT:")
         print(f"  * Best Trial:            #{best_trial.number}")
-        print(f"  * Validation Score:       {best_trial.value:.6f}")
+        print(f"  * Best Validation Score:  {best_trial.value:.6f}")
         print(f"  * Preserved Checkpoint:   {checkpoint_manager.best_checkpoint_path}")
         print("  * Best Hyperparameters:")
         for param, value in best_trial.params.items():
