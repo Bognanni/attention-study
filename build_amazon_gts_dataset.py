@@ -1,13 +1,17 @@
 import os
+import sys
 import json
 import gzip
+import time
 import shutil
+import csv
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
 import argparse
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # All 34 categories available in Amazon Reviews 2023 (benchmark 0core rating_only)
 ALL_AMAZON_2023_CATEGORIES = [
@@ -23,25 +27,46 @@ ALL_AMAZON_2023_CATEGORIES = [
     "Toys_and_Games", "Unknown", "Video_Games"
 ]
 
-BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/benchmark/0core/rating_only"
+RATING_BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/benchmark/0core/rating_only"
+META_BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories"
+
+
+def download_file(url, target_path, retries=3):
+    """
+    Downloads a remote file with retries and temporary part file handling.
+    """
+    target_path = Path(target_path)
+    if target_path.exists() and target_path.stat().st_size > 0:
+        return target_path
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_suffix(target_path.suffix + ".part")
+
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Amazon GTS Dataset Builder)"})
+            with urllib.request.urlopen(req, timeout=60) as resp, open(temp_path, "wb") as f_out:
+                shutil.copyfileobj(resp, f_out)
+            shutil.move(temp_path, target_path)
+            return target_path
+        except Exception as e:
+            if temp_path.exists():
+                temp_path.unlink()
+            if attempt == retries:
+                print(f"[ERROR] Failed to download {url} after {retries} attempts: {e}")
+                raise e
+            time.sleep(2 * attempt)
+    return target_path
+
 
 def download_category_if_needed(category, cache_dir):
+    """
+    Downloads the specified Amazon 2023 rating CSV file if not already cached.
+    """
     cache_path = cache_dir / f"{category}.csv.gz"
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        return cache_path
-    
-    url = f"{BASE_URL}/{category}.csv.gz"
-    print(f"Downloading {category} from {url}...")
-    temp_path = cache_dir / f"{category}.csv.gz.part"
-    try:
-        urllib.request.urlretrieve(url, temp_path)
-        shutil.move(temp_path, cache_path)
-        print(f"Saved {category} ({cache_path.stat().st_size / (1024*1024):.2f} MB)")
-    except Exception as e:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise RuntimeError(f"Failed to download {category}: {e}")
-    return cache_path
+    url = f"{RATING_BASE_URL}/{category}.csv.gz"
+    return download_file(url, cache_path)
+
 
 def stream_interactions_in_window(file_path, t_min, t_max):
     """
@@ -51,7 +76,7 @@ def stream_interactions_in_window(file_path, t_min, t_max):
     """
     interactions = []
     file_str = str(file_path)
-    
+
     # Handle CSV.GZ
     if file_str.endswith(".csv.gz"):
         with gzip.open(file_path, "rt", encoding="utf-8", errors="ignore") as f:
@@ -98,6 +123,7 @@ def stream_interactions_in_window(file_path, t_min, t_max):
 
     return interactions
 
+
 def run_iterative_k_core(train_user_items, min_user_core, min_freq_warm):
     """
     Applies iterative k-core decomposition strictly on the training partition.
@@ -135,8 +161,8 @@ def run_iterative_k_core(train_user_items, min_user_core, min_freq_warm):
             for i in items:
                 post_item_counts[i] += 1
 
-        all_items_warm = all(c >= min_freq_warm for c in post_item_counts.values())
-        print(f"  • Iteration {iteration}: {num_users_end:,} users, {len(post_item_counts):,} items (all items >= {min_freq_warm}: {all_items_warm})")
+        all_items_warm = all(c >= min_freq_warm for c in post_item_counts.values()) if post_item_counts else False
+        print(f"  • Iteration {iteration:2d}: {num_users_end:,} users, {len(post_item_counts):,} items (all items >= {min_freq_warm}: {all_items_warm})")
 
         # Convergence condition: no users dropped and all items satisfy the warm threshold
         if num_users_start == num_users_end and all_items_warm:
@@ -147,6 +173,156 @@ def run_iterative_k_core(train_user_items, min_user_core, min_freq_warm):
         if len(current_users) == 0:
             print(f"WARNING: Iterative core filtering reduced training set to 0 users.")
             return {}, set()
+
+
+def export_item_metadata(
+    warm_catalog,
+    item_map,
+    categories,
+    cache_dir,
+    output_dir,
+    meta_threads=8,
+    keep_meta_files=False
+):
+    """
+    Downloads Amazon Reviews 2023 product metadata (meta_categories) and associates
+    each warm item (parent_asin) with its real-world title, main category, brand/store,
+    average rating, review count, and price.
+
+    Exports:
+      - {output_dir}/item_metadata.csv
+      - {output_dir}/item_id_to_title.json
+      - {output_dir}/item_id_to_asin.json
+      - {output_dir}/asin_to_item_id.json
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    meta_cache = Path(cache_dir) / "meta_categories"
+    meta_cache.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 80)
+    print("METADATA EXTRACTION: AMAZON REVIEWS 2023 (meta_categories)")
+    print(f"  Warm Items to Map : {len(warm_catalog):,}")
+    print(f"  Target Categories : {len(categories)}")
+    print(f"  Download Threads  : {meta_threads}")
+    print(f"  Keep Raw Files    : {keep_meta_files}")
+    print("=" * 80)
+
+    # 1. Export initial ID <-> ASIN mappings
+    asin_to_id = dict(item_map)
+    id_to_asin = {v: k for k, v in item_map.items()}
+
+    with open(output_dir / "asin_to_item_id.json", "w", encoding="utf-8") as f:
+        json.dump(asin_to_id, f)
+    with open(output_dir / "item_id_to_asin.json", "w", encoding="utf-8") as f:
+        json.dump(id_to_asin, f)
+
+    # 2. Worker function to download and scan a single category metadata file
+    metadata_map = {}
+
+    def process_metadata_category(cat_name):
+        url = f"{META_BASE_URL}/meta_{cat_name}.jsonl.gz"
+        dest = meta_cache / f"meta_{cat_name}.jsonl.gz"
+        download_file(url, dest)
+
+        found_in_cat = {}
+        with gzip.open(dest, "rt", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    asin = data.get("parent_asin")
+                    if asin in warm_catalog and asin not in found_in_cat:
+                        title = (data.get("title") or "").strip().replace("\n", " ").replace("\r", " ")
+                        main_cat = data.get("main_category") or cat_name
+                        store = data.get("store") or ""
+                        avg_rating = data.get("average_rating") or ""
+                        rating_num = data.get("rating_number") or ""
+                        price = data.get("price") or ""
+
+                        found_in_cat[asin] = {
+                            "title": title,
+                            "main_category": main_cat,
+                            "store": store,
+                            "average_rating": avg_rating,
+                            "rating_number": rating_num,
+                            "price": price
+                        }
+                except Exception:
+                    continue
+
+        # Clean up raw gz file immediately to save disk quota on cloud instances
+        if not keep_meta_files and dest.exists():
+            dest.unlink()
+
+        return cat_name, found_in_cat
+
+    # 3. Process categories in parallel
+    print(f"Streaming metadata across {len(categories)} categories...")
+    with ThreadPoolExecutor(max_workers=min(meta_threads, len(categories))) as executor:
+        futures = {executor.submit(process_metadata_category, c): c for c in categories}
+        for future in as_completed(futures):
+            cat = futures[future]
+            try:
+                category, found = future.result()
+                metadata_map.update(found)
+                pct = (len(metadata_map) / max(1, len(warm_catalog))) * 100
+                print(f"  • {category:30}: {len(found):5,} items found (Total: {len(metadata_map):,}/{len(warm_catalog):,} - {pct:.1f}%)")
+            except Exception as e:
+                print(f"  [WARNING] Metadata extraction failed for {cat}: {e}")
+
+    # 4. Export CSV and JSON title lookup
+    csv_path = output_dir / "item_metadata.csv"
+    id_to_title_path = output_dir / "item_id_to_title.json"
+    id_to_title = {}
+
+    with open(csv_path, "w", encoding="utf-8", newline="") as f_csv:
+        writer = csv.writer(f_csv)
+        writer.writerow(["item_id", "parent_asin", "title", "main_category", "store", "average_rating", "rating_number", "price"])
+
+        for item_id in range(1, len(warm_catalog) + 1):
+            asin = id_to_asin[item_id]
+            meta = metadata_map.get(asin, {})
+            title = meta.get("title") or f"Item {asin}"
+            main_cat = meta.get("main_category") or "Unknown"
+            store = meta.get("store") or ""
+            avg_rating = meta.get("average_rating") or ""
+            rating_num = meta.get("rating_number") or ""
+            price = meta.get("price") or ""
+
+            writer.writerow([item_id, asin, title, main_cat, store, avg_rating, rating_num, price])
+            id_to_title[item_id] = title
+
+    with open(id_to_title_path, "w", encoding="utf-8") as f_json:
+        json.dump(id_to_title, f_json)
+
+    print("\n" + "=" * 80)
+    print("METADATA EXPORT SUMMARY:")
+    print(f"  • CSV file generated  : {csv_path} ({csv_path.stat().st_size / (1024*1024):.2f} MB)")
+    print(f"  • JSON titles file    : {id_to_title_path} ({id_to_title_path.stat().st_size / (1024*1024):.2f} MB)")
+    print(f"  • Titles coverage     : {len(metadata_map):,} / {len(warm_catalog):,} ({(len(metadata_map)/max(1, len(warm_catalog)))*100:.2f}%)")
+    print("=" * 80 + "\n")
+
+    # 5. Preview decoded test sequences if test files exist
+    test_inp_path = output_dir / "test" / "input.txt"
+    test_out_path = output_dir / "test" / "output.txt"
+    if test_inp_path.exists() and test_out_path.exists():
+        print("--- PREVIEW: REAL TEST SEQUENCES WITH PRODUCT TITLES ---")
+        with open(test_inp_path, "r", encoding="utf-8") as f_in, open(test_out_path, "r", encoding="utf-8") as f_out:
+            for sample_idx in range(2):
+                inp_line = f_in.readline().strip()
+                out_line = f_out.readline().strip()
+                if not inp_line or not out_line:
+                    break
+                seq_ids = [int(x) for x in inp_line.split()]
+                target_id = int(out_line)
+
+                print(f"\n[Test User Sample #{sample_idx + 1}]")
+                print("  Purchase History (Transformer Input):")
+                for pos, i_id in enumerate(seq_ids[-5:], start=max(1, len(seq_ids) - 4)):
+                    print(f"    {pos}. [ID: {i_id:6d}] {id_to_title.get(i_id, 'N/A')[:80]}")
+                print(f"  -> Next-Item Target: [ID: {target_id:6d}] {id_to_title.get(target_id, 'N/A')[:80]}")
+        print("=" * 80 + "\n")
+
 
 def build_and_export_dataset(
     user_timeline,
@@ -159,7 +335,13 @@ def build_and_export_dataset(
     min_freq_warm,
     max_seq_len,
     val_users_count,
-    output_dir
+    output_dir,
+    export_metadata=False,
+    only_metadata=False,
+    categories=None,
+    cache_dir="raw_amazon_2023",
+    meta_threads=8,
+    keep_meta_files=False
 ):
     output_dir = Path(output_dir)
     (output_dir / "train").mkdir(parents=True, exist_ok=True)
@@ -179,6 +361,7 @@ def build_and_export_dataset(
     print(f"  Test Window      : ({datetime.fromtimestamp(t_split, tz=timezone.utc)} -> {datetime.fromtimestamp(t_end, tz=timezone.utc)}] ({test_days} days)")
     print(f"  Min User Core    : >= {min_user_core}")
     print(f"  Min Warm Freq    : >= {min_freq_warm}")
+    print(f"  Export Metadata  : {export_metadata}")
     print("="*80)
 
     # 2. Run Iterative k-core decomposition on train
@@ -195,8 +378,22 @@ def build_and_export_dataset(
     print(f"Filtered Catalog Vocabulary: {len(item_map):,} warm items (all >= {min_freq_warm} in train)")
     print(f"Surviving Training Users:     {len(user_map):,} users (all >= {min_user_core} warm items)")
 
+    # If --only_metadata is specified, skip dataset file generation and run metadata export directly
+    if only_metadata:
+        print("\n[--only_metadata active] Skipping train/val/test file generation.")
+        cats_to_fetch = ALL_AMAZON_2023_CATEGORIES if not categories or "all" in categories else categories
+        export_item_metadata(
+            warm_catalog=warm_catalog,
+            item_map=item_map,
+            categories=cats_to_fetch,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            meta_threads=meta_threads,
+            keep_meta_files=keep_meta_files
+        )
+        return
+
     # 4. Build Test Set
-    # Input history strictly in [t_start, t_split) using item_map; Target is the first item post-t_split
     test_inputs, test_outputs = [], []
     for u, history in user_timeline.items():
         past_items = [item_map[i] for t, i in history if t_start <= t < t_split and i in item_map]
@@ -209,7 +406,6 @@ def build_and_export_dataset(
                 test_outputs.append(item_map[true_first_future_item])
 
     # 5. Build Train & Validation Sets
-    # Select validation users from filtered training users
     rng = np.random.RandomState(42)
     eligible_val_users = [u for u, items in filtered_train_users.items() if len(items) >= 2]
     num_val = min(val_users_count, len(eligible_val_users))
@@ -221,10 +417,8 @@ def build_and_export_dataset(
     for u, items in filtered_train_users.items():
         seq = [item_map[i] for i in items]
         if u in val_user_set:
-            # Leave the last item of train for validation
             val_inputs.append(seq[:-1][-max_seq_len:])
             val_outputs.append(seq[-1])
-            # Train sequence gets the remaining prefix
             if len(seq[:-1]) >= 1:
                 train_sequences.append(seq[:-1][-max_seq_len:])
         else:
@@ -287,8 +481,22 @@ def build_and_export_dataset(
     print(f"  • Test evaluation samples:       {stats['num_test_samples']:,}")
     print("="*80 + "\n")
 
+    # 8. Export metadata if requested
+    if export_metadata:
+        cats_to_fetch = ALL_AMAZON_2023_CATEGORIES if not categories or "all" in categories else categories
+        export_item_metadata(
+            warm_catalog=warm_catalog,
+            item_map=item_map,
+            categories=cats_to_fetch,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            meta_threads=meta_threads,
+            keep_meta_files=keep_meta_files
+        )
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Build and Export Amazon 2023 GTS Dataset with Iterative Core Filtering")
+    parser = argparse.ArgumentParser(description="Build and Export Amazon 2023 GTS Dataset with Iterative Core Filtering & Metadata")
     parser.add_argument("--categories", nargs="+", default=["All_Beauty"],
                         help="List of Amazon 2023 categories to include or 'all' for all 34 categories.")
     parser.add_argument("--local_file", type=str, default=None,
@@ -311,7 +519,18 @@ def main():
                         help="Number of training users sampled for internal validation (default: 1024).")
     parser.add_argument("--t_end", type=float, default=None,
                         help="Optional fixed end timestamp. Defaults to 2023-09-09 00:00:00 UTC.")
+    parser.add_argument("--export_metadata", action="store_true",
+                        help="Download product metadata and export item_metadata.csv, item_id_to_title.json, etc.")
+    parser.add_argument("--only_metadata", action="store_true",
+                        help="Reconstruct warm catalog and export metadata only without re-generating train/val/test splits.")
+    parser.add_argument("--meta_threads", type=int, default=8,
+                        help="Number of parallel worker threads for downloading metadata files (default: 8).")
+    parser.add_argument("--keep_meta_files", action="store_true",
+                        help="Keep raw meta_{category}.jsonl.gz files on disk after processing (default: False, cleans up to save disk space).")
     args = parser.parse_args()
+
+    if args.only_metadata:
+        args.export_metadata = True
 
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -376,8 +595,15 @@ def main():
         min_freq_warm=args.min_freq_warm,
         max_seq_len=args.max_seq_len,
         val_users_count=args.val_users,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        export_metadata=args.export_metadata,
+        only_metadata=args.only_metadata,
+        categories=args.categories,
+        cache_dir=args.cache_dir,
+        meta_threads=args.meta_threads,
+        keep_meta_files=args.keep_meta_files
     )
+
 
 if __name__ == "__main__":
     main()

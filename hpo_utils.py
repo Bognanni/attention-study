@@ -24,7 +24,7 @@ config = GSASRecExperimentConfig(
     dropout_rate={dropout_rate},
     negs_per_pos={negs_per_pos},
     gbce_t={gbce_t},
-    reuse_item_embeddings=False,
+    reuse_item_embeddings={reuse_item_embeddings},
     recommendation_limit=50,
     val_metric=R@50,
     metrics=[R@50, nDCG@50, nDCG@10, R@10, R@1],
@@ -49,11 +49,12 @@ TARGET_METRIC_LABEL = get_target_metric_label(TEMPLATE_CONFIG)
 # ==============================================================================
 # Shared base transformer architectural configuration
 COMMON_ARCH_GRID = {
-    'embedding_dim': [64, 128],
-    'num_blocks': [2],
-    'num_heads': [1],
+    'embedding_dim': [64, 128, 256, 512],
+    'num_blocks': [2, 3, 4],
+    'num_heads': [1, 2, 4],
     'sequence_length': [50],
     'train_batch_size': [128],
+    'reuse_item_embeddings': [False, True],
 }
 
 
@@ -75,7 +76,7 @@ def get_search_grid(model_type: str) -> dict:
         })
     elif model_key == 'gsasrec':
         grid.update({
-            'dropout_rate': [0.3, 0.5],
+            'dropout_rate': [0.3, 0.6, 0.8],
             'gbce_t': [0.5, 0.75],
             'negs_per_pos': [128, 256],
         })

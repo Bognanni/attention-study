@@ -44,6 +44,7 @@ def create_objective(args, checkpoint_manager: BestCheckpointManager):
             gbce_t=sampled_params['gbce_t'],
             max_epochs=args.max_epochs,
             early_stopping_patience=args.patience,
+            reuse_item_embeddings=sampled_params['reuse_item_embeddings'],
         )
 
         trial_label = args.model_type.upper()
