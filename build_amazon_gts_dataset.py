@@ -31,7 +31,7 @@ RATING_BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/
 META_BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories"
 
 
-def download_file(url, target_path, retries=3):
+def download_file(url, target_path, retries=3, show_progress=False):
     """
     Downloads a remote file with retries and temporary part file handling.
     """
@@ -41,6 +41,9 @@ def download_file(url, target_path, retries=3):
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = target_path.with_suffix(target_path.suffix + ".part")
+
+    if show_progress:
+        print(f"  Downloading {url} ...", flush=True)
 
     for attempt in range(1, retries + 1):
         try:
@@ -53,7 +56,7 @@ def download_file(url, target_path, retries=3):
             if temp_path.exists():
                 temp_path.unlink()
             if attempt == retries:
-                print(f"[ERROR] Failed to download {url} after {retries} attempts: {e}")
+                print(f"[ERROR] Failed to download {url} after {retries} attempts: {e}", flush=True)
                 raise e
             time.sleep(2 * attempt)
     return target_path
@@ -132,12 +135,12 @@ def run_iterative_k_core(train_user_items, min_user_core, min_freq_warm):
     iteration = 0
     current_users = dict(train_user_items)
 
-    print(f"\nRunning iterative {min_user_core}-core decomposition on training window...")
+    print(f"\nRunning iterative {min_user_core}-core decomposition on training window...", flush=True)
     while True:
         iteration += 1
         num_users_start = len(current_users)
 
-        # 1. Count item frequency
+        # Count item frequency
         item_counts = Counter()
         for items in current_users.values():
             for i in items:
@@ -146,7 +149,7 @@ def run_iterative_k_core(train_user_items, min_user_core, min_freq_warm):
         # Keep items meeting frequency threshold
         warm_items = {i for i, c in item_counts.items() if c >= min_freq_warm}
 
-        # 2. Filter users: keep only warm items and users with at least min_user_core items
+        # Filter users: keep only warm items and users with at least min_user_core items
         new_users = {}
         for u, items in current_users.items():
             filtered = [i for i in items if i in warm_items]
@@ -155,23 +158,23 @@ def run_iterative_k_core(train_user_items, min_user_core, min_freq_warm):
 
         num_users_end = len(new_users)
 
-        # 3. Re-verify item frequencies on filtered users
+        # Re-verify item frequencies on filtered users
         post_item_counts = Counter()
         for items in new_users.values():
             for i in items:
                 post_item_counts[i] += 1
 
         all_items_warm = all(c >= min_freq_warm for c in post_item_counts.values()) if post_item_counts else False
-        print(f"  • Iteration {iteration:2d}: {num_users_end:,} users, {len(post_item_counts):,} items (all items >= {min_freq_warm}: {all_items_warm})")
+        print(f"  • Iteration {iteration:2d}: {num_users_end:,} users, {len(post_item_counts):,} items (all items >= {min_freq_warm}: {all_items_warm})", flush=True)
 
         # Convergence condition: no users dropped and all items satisfy the warm threshold
         if num_users_start == num_users_end and all_items_warm:
-            print(f"  [CONVERGED] Iterative {min_user_core}-core reached stability in {iteration} iteration(s).\n")
+            print(f"  [CONVERGED] Iterative {min_user_core}-core reached stability in {iteration} iteration(s).\n", flush=True)
             return new_users, set(post_item_counts.keys())
 
         current_users = new_users
         if len(current_users) == 0:
-            print(f"WARNING: Iterative core filtering reduced training set to 0 users.")
+            print("WARNING: Iterative core filtering reduced training set to 0 users.", flush=True)
             return {}, set()
 
 
@@ -200,13 +203,13 @@ def export_item_metadata(
     meta_cache = Path(cache_dir) / "meta_categories"
     meta_cache.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 80)
-    print("METADATA EXTRACTION: AMAZON REVIEWS 2023 (meta_categories)")
-    print(f"  Warm Items to Map : {len(warm_catalog):,}")
-    print(f"  Target Categories : {len(categories)}")
-    print(f"  Download Threads  : {meta_threads}")
-    print(f"  Keep Raw Files    : {keep_meta_files}")
-    print("=" * 80)
+    print("=" * 80, flush=True)
+    print("METADATA EXTRACTION: AMAZON REVIEWS 2023 (meta_categories)", flush=True)
+    print(f"  Warm Items to Map : {len(warm_catalog):,}", flush=True)
+    print(f"  Target Categories : {len(categories)}", flush=True)
+    print(f"  Download Threads  : {meta_threads}", flush=True)
+    print(f"  Keep Raw Files    : {keep_meta_files}", flush=True)
+    print("=" * 80, flush=True)
 
     # 1. Export initial ID <-> ASIN mappings
     asin_to_id = dict(item_map)
@@ -216,6 +219,8 @@ def export_item_metadata(
         json.dump(asin_to_id, f)
     with open(output_dir / "item_id_to_asin.json", "w", encoding="utf-8") as f:
         json.dump(id_to_asin, f)
+    print(f"  • Exported: {output_dir / 'asin_to_item_id.json'}", flush=True)
+    print(f"  • Exported: {output_dir / 'item_id_to_asin.json'}", flush=True)
 
     # 2. Worker function to download and scan a single category metadata file
     metadata_map = {}
@@ -257,7 +262,7 @@ def export_item_metadata(
         return cat_name, found_in_cat
 
     # 3. Process categories in parallel
-    print(f"Streaming metadata across {len(categories)} categories...")
+    print(f"\nStreaming metadata across {len(categories)} categories (threads={meta_threads})...", flush=True)
     with ThreadPoolExecutor(max_workers=min(meta_threads, len(categories))) as executor:
         futures = {executor.submit(process_metadata_category, c): c for c in categories}
         for future in as_completed(futures):
@@ -266,9 +271,9 @@ def export_item_metadata(
                 category, found = future.result()
                 metadata_map.update(found)
                 pct = (len(metadata_map) / max(1, len(warm_catalog))) * 100
-                print(f"  • {category:30}: {len(found):5,} items found (Total: {len(metadata_map):,}/{len(warm_catalog):,} - {pct:.1f}%)")
+                print(f"  • {category:30}: {len(found):5,} items found (Total: {len(metadata_map):,}/{len(warm_catalog):,} - {pct:.1f}%)", flush=True)
             except Exception as e:
-                print(f"  [WARNING] Metadata extraction failed for {cat}: {e}")
+                print(f"  [WARNING] Metadata extraction failed for {cat}: {e}", flush=True)
 
     # 4. Export CSV and JSON title lookup
     csv_path = output_dir / "item_metadata.csv"
@@ -295,18 +300,18 @@ def export_item_metadata(
     with open(id_to_title_path, "w", encoding="utf-8") as f_json:
         json.dump(id_to_title, f_json)
 
-    print("\n" + "=" * 80)
-    print("METADATA EXPORT SUMMARY:")
-    print(f"  • CSV file generated  : {csv_path} ({csv_path.stat().st_size / (1024*1024):.2f} MB)")
-    print(f"  • JSON titles file    : {id_to_title_path} ({id_to_title_path.stat().st_size / (1024*1024):.2f} MB)")
-    print(f"  • Titles coverage     : {len(metadata_map):,} / {len(warm_catalog):,} ({(len(metadata_map)/max(1, len(warm_catalog)))*100:.2f}%)")
-    print("=" * 80 + "\n")
+    print("\n" + "=" * 80, flush=True)
+    print("METADATA EXPORT SUMMARY:", flush=True)
+    print(f"  • CSV file generated  : {csv_path} ({csv_path.stat().st_size / (1024*1024):.2f} MB)", flush=True)
+    print(f"  • JSON titles file    : {id_to_title_path} ({id_to_title_path.stat().st_size / (1024*1024):.2f} MB)", flush=True)
+    print(f"  • Titles coverage     : {len(metadata_map):,} / {len(warm_catalog):,} ({(len(metadata_map)/max(1, len(warm_catalog)))*100:.2f}%)", flush=True)
+    print("=" * 80 + "\n", flush=True)
 
     # 5. Preview decoded test sequences if test files exist
     test_inp_path = output_dir / "test" / "input.txt"
     test_out_path = output_dir / "test" / "output.txt"
     if test_inp_path.exists() and test_out_path.exists():
-        print("--- PREVIEW: REAL TEST SEQUENCES WITH PRODUCT TITLES ---")
+        print("--- PREVIEW: REAL TEST SEQUENCES WITH PRODUCT TITLES ---", flush=True)
         with open(test_inp_path, "r", encoding="utf-8") as f_in, open(test_out_path, "r", encoding="utf-8") as f_out:
             for sample_idx in range(2):
                 inp_line = f_in.readline().strip()
@@ -316,12 +321,12 @@ def export_item_metadata(
                 seq_ids = [int(x) for x in inp_line.split()]
                 target_id = int(out_line)
 
-                print(f"\n[Test User Sample #{sample_idx + 1}]")
-                print("  Purchase History (Transformer Input):")
+                print(f"\n[Test User Sample #{sample_idx + 1}]", flush=True)
+                print("  Purchase History (Transformer Input):", flush=True)
                 for pos, i_id in enumerate(seq_ids[-5:], start=max(1, len(seq_ids) - 4)):
-                    print(f"    {pos}. [ID: {i_id:6d}] {id_to_title.get(i_id, 'N/A')[:80]}")
-                print(f"  -> Next-Item Target: [ID: {target_id:6d}] {id_to_title.get(target_id, 'N/A')[:80]}")
-        print("=" * 80 + "\n")
+                    print(f"    {pos}. [ID: {i_id:6d}] {id_to_title.get(i_id, 'N/A')[:80]}", flush=True)
+                print(f"  -> Next-Item Target: [ID: {target_id:6d}] {id_to_title.get(target_id, 'N/A')[:80]}", flush=True)
+        print("=" * 80 + "\n", flush=True)
 
 
 def build_and_export_dataset(
@@ -348,23 +353,23 @@ def build_and_export_dataset(
     (output_dir / "val").mkdir(parents=True, exist_ok=True)
     (output_dir / "test").mkdir(parents=True, exist_ok=True)
 
-    # 1. Extract raw training interactions strictly in [t_start, t_split)
+    # Extract raw training interactions strictly in [t_start, t_split)
     train_user_items = {}
     for u, history in user_timeline.items():
         train_items = [i for t, i in history if t_start <= t < t_split]
         if len(train_items) >= min_user_core:
             train_user_items[u] = train_items
 
-    print("="*80)
-    print("DATASET PREPARATION: GLOBAL TIMELINE SPLIT + ITERATIVE K-CORE")
-    print(f"  Training Window  : [{datetime.fromtimestamp(t_start, tz=timezone.utc)} -> {datetime.fromtimestamp(t_split, tz=timezone.utc)}) ({train_days} days)")
-    print(f"  Test Window      : ({datetime.fromtimestamp(t_split, tz=timezone.utc)} -> {datetime.fromtimestamp(t_end, tz=timezone.utc)}] ({test_days} days)")
-    print(f"  Min User Core    : >= {min_user_core}")
-    print(f"  Min Warm Freq    : >= {min_freq_warm}")
-    print(f"  Export Metadata  : {export_metadata}")
-    print("="*80)
+    print("="*80, flush=True)
+    print("DATASET PREPARATION: GLOBAL TIMELINE SPLIT + ITERATIVE K-CORE", flush=True)
+    print(f"  Training Window  : [{datetime.fromtimestamp(t_start, tz=timezone.utc)} -> {datetime.fromtimestamp(t_split, tz=timezone.utc)}) ({train_days} days)", flush=True)
+    print(f"  Test Window      : ({datetime.fromtimestamp(t_split, tz=timezone.utc)} -> {datetime.fromtimestamp(t_end, tz=timezone.utc)}] ({test_days} days)", flush=True)
+    print(f"  Min User Core    : >= {min_user_core}", flush=True)
+    print(f"  Min Warm Freq    : >= {min_freq_warm}", flush=True)
+    print(f"  Export Metadata  : {export_metadata}", flush=True)
+    print("="*80, flush=True)
 
-    # 2. Run Iterative k-core decomposition on train
+    # Run Iterative k-core decomposition on train
     filtered_train_users, warm_catalog = run_iterative_k_core(train_user_items, min_user_core, min_freq_warm)
 
     if not filtered_train_users or not warm_catalog:
@@ -375,12 +380,12 @@ def build_and_export_dataset(
     item_map = {item: idx + 1 for idx, item in enumerate(sorted_catalog)}
     user_map = {u: idx + 1 for idx, u in enumerate(sorted(filtered_train_users.keys()))}
 
-    print(f"Filtered Catalog Vocabulary: {len(item_map):,} warm items (all >= {min_freq_warm} in train)")
-    print(f"Surviving Training Users:     {len(user_map):,} users (all >= {min_user_core} warm items)")
+    print(f"Filtered Catalog Vocabulary: {len(item_map):,} warm items (all >= {min_freq_warm} in train)", flush=True)
+    print(f"Surviving Training Users:     {len(user_map):,} users (all >= {min_user_core} warm items)", flush=True)
 
     # If --only_metadata is specified, skip dataset file generation and run metadata export directly
     if only_metadata:
-        print("\n[--only_metadata active] Skipping train/val/test file generation.")
+        print("\n[--only_metadata active] Skipping train/val/test file generation.", flush=True)
         cats_to_fetch = ALL_AMAZON_2023_CATEGORIES if not categories or "all" in categories else categories
         export_item_metadata(
             warm_catalog=warm_catalog,
@@ -425,7 +430,7 @@ def build_and_export_dataset(
             train_sequences.append(seq[-max_seq_len:])
 
     # 6. Save text dataset files
-    print("\nWriting dataset files...")
+    print("\nWriting dataset files...", flush=True)
     with open(output_dir / "train" / "input.txt", "w") as f:
         for seq in train_sequences:
             f.write(" ".join(map(str, seq)) + "\n")
@@ -473,13 +478,13 @@ def build_and_export_dataset(
     with open(output_dir / "dataset_stats.json", "w") as f:
         json.dump(stats, f, indent=4)
 
-    print(f"\n[DONE] Global Timeline Split successfully written to: {output_dir}")
-    print(f"  • Items in catalog vocabulary: {stats['num_items']:,}")
-    print(f"  • Training sequences:         {stats['num_train_sequences']:,}")
-    print(f"  • Training interactions:      {stats['num_train_interactions']:,} (avg length: {stats['avg_train_seq_len']})")
-    print(f"  • Validation evaluation samples: {stats['num_val_samples']:,}")
-    print(f"  • Test evaluation samples:       {stats['num_test_samples']:,}")
-    print("="*80 + "\n")
+    print(f"\n[DONE] Global Timeline Split successfully written to: {output_dir}", flush=True)
+    print(f"  • Items in catalog vocabulary: {stats['num_items']:,}", flush=True)
+    print(f"  • Training sequences:         {stats['num_train_sequences']:,}", flush=True)
+    print(f"  • Training interactions:      {stats['num_train_interactions']:,} (avg length: {stats['avg_train_seq_len']})", flush=True)
+    print(f"  • Validation evaluation samples: {stats['num_val_samples']:,}", flush=True)
+    print(f"  • Test evaluation samples:       {stats['num_test_samples']:,}", flush=True)
+    print("="*80 + "\n", flush=True)
 
     # 8. Export metadata if requested
     if export_metadata:
@@ -535,42 +540,78 @@ def main():
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    files_to_process = []
-    if args.local_file and os.path.exists(args.local_file):
-        files_to_process.append(Path(args.local_file))
-    else:
-        cats = ALL_AMAZON_2023_CATEGORIES if "all" in args.categories else args.categories
-        for c in cats:
-            local_cand = Path(f"{c}.jsonl/{c}.jsonl")
-            if local_cand.exists():
-                files_to_process.append(local_cand)
-            else:
-                files_to_process.append(download_category_if_needed(c, cache_dir))
-
     DEFAULT_AMAZON_2023_END = 1694227200.0
     t_end = args.t_end if args.t_end is not None else DEFAULT_AMAZON_2023_END
     t_split = t_end - (args.test_days * 86400)
     t_start = t_split - (args.train_days * 86400)
 
-    print(f"Reference End Timestamp : {t_end} ({datetime.fromtimestamp(t_end, tz=timezone.utc)})")
-    print(f"Global Split Timestamp  : {t_split} ({datetime.fromtimestamp(t_split, tz=timezone.utc)})")
-    print(f"Training Start Timestamp: {t_start} ({datetime.fromtimestamp(t_start, tz=timezone.utc)})")
+    # Print startup banner
+    print("=" * 80, flush=True)
+    print("AMAZON 2023 GLOBAL TIMELINE SPLIT DATASET BUILDER", flush=True)
+    print(f"  Reference End Timestamp : {t_end} ({datetime.fromtimestamp(t_end, tz=timezone.utc)})", flush=True)
+    print(f"  Global Split Timestamp  : {t_split} ({datetime.fromtimestamp(t_split, tz=timezone.utc)})", flush=True)
+    print(f"  Training Start Timestamp: {t_start} ({datetime.fromtimestamp(t_start, tz=timezone.utc)})", flush=True)
+    print(f"  Train Days              : {args.train_days}", flush=True)
+    print(f"  Test Days               : {args.test_days}", flush=True)
+    print(f"  Only Metadata Mode      : {args.only_metadata}", flush=True)
+    print(f"  Export Metadata         : {args.export_metadata}", flush=True)
+    print("=" * 80, flush=True)
+
+    # Download / prepare candidate rating files
+    print("\n[Step 1] Preparing source rating files...", flush=True)
+    files_to_process = []
+    if args.local_file and os.path.exists(args.local_file):
+        files_to_process.append(Path(args.local_file))
+        print(f"  Using local file: {args.local_file}", flush=True)
+    else:
+        cats = ALL_AMAZON_2023_CATEGORIES if "all" in args.categories else args.categories
+        to_download = []
+        for c in cats:
+            local_cand = Path(f"{c}.jsonl/{c}.jsonl")
+            if local_cand.exists():
+                files_to_process.append(local_cand)
+                print(f"  [Local JSONL] Found {local_cand}", flush=True)
+            else:
+                cache_path = cache_dir / f"{c}.csv.gz"
+                if cache_path.exists() and cache_path.stat().st_size > 0:
+                    files_to_process.append(cache_path)
+                    print(f"  [Cached] {cache_path.name} ({cache_path.stat().st_size / (1024*1024):.1f} MB)", flush=True)
+                else:
+                    to_download.append(c)
+
+        if to_download:
+            print(f"  Downloading {len(to_download)} rating category files in parallel (threads={args.meta_threads})...", flush=True)
+            with ThreadPoolExecutor(max_workers=args.meta_threads) as executor:
+                future_to_cat = {executor.submit(download_category_if_needed, c, cache_dir): c for c in to_download}
+                for future in as_completed(future_to_cat):
+                    c = future_to_cat[future]
+                    try:
+                        dest = future.result()
+                        files_to_process.append(dest)
+                        sz_mb = dest.stat().st_size / (1024 * 1024)
+                        print(f"  [OK] Downloaded {dest.name:30} ({sz_mb:6.1f} MB)", flush=True)
+                    except Exception as e:
+                        print(f"  [ERROR] Failed to download {c}: {e}", flush=True)
+                        raise e
 
     # Load candidate interactions strictly in [t_start, t_end]
-    print(f"\nLoading interactions from {len(files_to_process)} source(s) in window [{t_start}, {t_end}]...")
+    print(f"\n[Step 2] Loading interactions from {len(files_to_process)} source(s) in window [{t_start}, {t_end}]...", flush=True)
     all_interactions = []
-    for f in files_to_process:
-        print(f"Reading from {f.name}...")
+    t0 = time.time()
+    for idx, f in enumerate(files_to_process, 1):
+        print(f"  [{idx}/{len(files_to_process)}] Reading from {f.name}...", flush=True)
         sub = stream_interactions_in_window(f, t_start, t_end)
         all_interactions.extend(sub)
-        print(f"  Extracted {len(sub):,} interactions within window.")
+        print(f"      Extracted {len(sub):,} interactions within window.", flush=True)
 
     if not all_interactions:
-        print("ERROR: No interactions found within the specified time window!")
+        print("ERROR: No interactions found within the specified time window!", flush=True)
         return
 
+    print(f"\nTotal interactions extracted: {len(all_interactions):,} in {time.time() - t0:.1f}s", flush=True)
+
     # Chronological sort and deduplication per user
-    print(f"Sorting and deduplicating {len(all_interactions):,} interactions...")
+    print(f"\n[Step 3] Sorting and deduplicating {len(all_interactions):,} interactions...", flush=True)
     user_timeline = defaultdict(list)
     seen = set()
     for u, i, t in all_interactions:
@@ -582,7 +623,7 @@ def main():
     for u in user_timeline:
         user_timeline[u].sort(key=lambda x: x[0])
 
-    print(f"Retained {sum(len(h) for h in user_timeline.values()):,} unique interactions across {len(user_timeline):,} users.")
+    print(f"Retained {sum(len(h) for h in user_timeline.values()):,} unique interactions across {len(user_timeline):,} users.\n", flush=True)
 
     build_and_export_dataset(
         user_timeline=user_timeline,
