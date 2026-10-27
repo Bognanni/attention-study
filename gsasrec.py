@@ -35,6 +35,7 @@ class GSASRec(torch.nn.Module):
         """
         if 0 <= layer_idx < len(self.transformer_blocks):
             self.transformer_blocks[layer_idx].disable_ffn = True
+            self.transformer_blocks[layer_idx].bias_only_ffn = False
         else:
             raise IndexError(f"Layer index {layer_idx} out of range (model has {len(self.transformer_blocks)} blocks)")
 
@@ -43,6 +44,19 @@ class GSASRec(torch.nn.Module):
         Enables the feed-forward network (FFN) of the specified transformer block.
         """
         if 0 <= layer_idx < len(self.transformer_blocks):
+            self.transformer_blocks[layer_idx].disable_ffn = False
+            self.transformer_blocks[layer_idx].bias_only_ffn = False
+        else:
+            raise IndexError(f"Layer index {layer_idx} out of range (model has {len(self.transformer_blocks)} blocks)")
+
+    def set_layer_ffn_bias_only(self, layer_idx=1):
+        """
+        Sets the specified transformer block's FFN to bias-only mode:
+        bypasses dense1, relu, and dense2.weight, adding only dense2.bias.
+        Used as a sanity check for dead ReLU layers.
+        """
+        if 0 <= layer_idx < len(self.transformer_blocks):
+            self.transformer_blocks[layer_idx].bias_only_ffn = True
             self.transformer_blocks[layer_idx].disable_ffn = False
         else:
             raise IndexError(f"Layer index {layer_idx} out of range (model has {len(self.transformer_blocks)} blocks)")

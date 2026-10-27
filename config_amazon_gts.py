@@ -13,6 +13,7 @@ config = GSASRecExperimentConfig(
     negs_per_pos=128,
     gbce_t=0.75,  # 0.0 for standard SASRec
     reuse_item_embeddings=False,
+    train_batch_size=512,
     recommendation_limit=100,    # 50 for HitRatio@50 (equals to Recall@50)
     val_metric=nDCG@10,
     metrics=[nDCG@100, nDCG@50, nDCG@20, nDCG@10, R@50, R@20, R@10, R@1]
