@@ -1,4 +1,3 @@
-torch
 requests
 numpy
 datasets
@@ -9,3 +8,6 @@ matplotlib
 seaborn
 networkx
 optuna
+piq
+gdown
+Pillow

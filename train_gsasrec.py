@@ -18,6 +18,12 @@ parser.add_argument('--disable_ffn_layers', type=int, nargs='*', default=[],
                     help="Indices of Transformer layers to disable FFN for (e.g. --disable_ffn_layers 0 1)")
 parser.add_argument('--disable_l1_ffn', action='store_true',
                     help="Convenience alias to disable Layer 1 FFN")
+parser.add_argument('--bias_only_ffn_layers', type=int, nargs='*', default=[],
+                    help="Indices of Transformer layers to set FFN to bias-only mode")
+parser.add_argument('--bias_only_l1_ffn', action='store_true',
+                    help="Convenience alias to set Layer 1 FFN to bias-only mode")
+parser.add_argument('--warm_bias_from', type=str, default=None,
+                    help="Path to checkpoint from which to initialize the bias vector for bias-only layers")
 args = parser.parse_args()
 config = load_config(args.config)
 
@@ -31,6 +37,21 @@ if hasattr(config, 'disable_ffn_layers'):
         if layer_idx not in disabled_layers:
             disabled_layers.append(layer_idx)
 
+# Determine bias-only FFN layers from CLI arguments and/or config object
+bias_only_layers = list(args.bias_only_ffn_layers)
+if (args.bias_only_l1_ffn or getattr(config, 'bias_only_l1_ffn', False)) and 1 not in bias_only_layers:
+    bias_only_layers.append(1)
+
+if hasattr(config, 'bias_only_ffn_layers'):
+    for layer_idx in config.bias_only_ffn_layers:
+        if layer_idx not in bias_only_layers:
+            bias_only_layers.append(layer_idx)
+
+# If a layer is marked both bias-only and disabled, bias-only takes precedence
+for l in bias_only_layers:
+    if l in disabled_layers:
+        disabled_layers.remove(l)
+
 num_items = get_num_items(config.dataset_name) 
 device = get_device()
 model = build_model(config)
@@ -43,6 +64,32 @@ if disabled_layers:
         for param in list(block.dense1.parameters()) + list(block.dense2.parameters()):
             param.requires_grad = False
     print(f"[INFO] FFN DISABLED for layer(s): {disabled_layers} (parameters frozen)")
+
+# Set specified FFN layers to bias-only mode and freeze weights
+if bias_only_layers:
+    for layer_idx in bias_only_layers:
+        model.set_layer_ffn_bias_only(layer_idx)
+        block = model.transformer_blocks[layer_idx]
+        for param in list(block.dense1.parameters()) + [block.dense2.weight]:
+            param.requires_grad = False
+        block.dense2.bias.requires_grad = True
+    print(f"[INFO] FFN BIAS-ONLY for layer(s): {bias_only_layers} (weights frozen, bias trainable)")
+
+# Optional warm-start of bias from existing checkpoint
+if args.warm_bias_from and bias_only_layers:
+    if os.path.exists(args.warm_bias_from):
+        warm_ckpt = torch.load(args.warm_bias_from, map_location='cpu', weights_only=True)
+        state = warm_ckpt.get('state_dict', warm_ckpt.get('model_state_dict', warm_ckpt))
+        for layer_idx in bias_only_layers:
+            key = f"transformer_blocks.{layer_idx}.dense2.bias"
+            if key in state:
+                model.transformer_blocks[layer_idx].dense2.bias.data.copy_(state[key])
+                norm_val = model.transformer_blocks[layer_idx].dense2.bias.norm().item()
+                print(f"[INFO] Warm-started bias for Layer {layer_idx} from {args.warm_bias_from} (norm: {norm_val:.4f})")
+            else:
+                print(f"[WARNING] Key '{key}' not found in checkpoint {args.warm_bias_from}")
+    else:
+        raise FileNotFoundError(f"Warm bias checkpoint not found: {args.warm_bias_from}")
 
 train_dataloader = get_train_dataloader(
     config.dataset_name,
@@ -58,6 +105,7 @@ val_dataloader = get_val_dataloader(
 
 # Optimize only active trainable parameters
 trainable_parameters = [p for p in model.parameters() if p.requires_grad]
+print(f"[INFO] Trainable parameters: {sum(p.numel() for p in trainable_parameters):,}")
 optimiser = torch.optim.Adam(trainable_parameters)
 batches_per_epoch = min(config.max_batches_per_epoch, len(train_dataloader))
 
