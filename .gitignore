@@ -16,6 +16,7 @@ amazon_gts_metadata/
 
 # My Models
 my_models/
+best_models/
 
 # Extensions of datasets
 *.jsonl
