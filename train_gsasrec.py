@@ -1,5 +1,7 @@
 from argparse import ArgumentParser
 import os
+import random
+import numpy as np
 
 import torch
 from utils import load_config, build_model, get_device
@@ -7,6 +9,40 @@ from dataset_utils import get_train_dataloader, get_num_items, get_val_dataloade
 from tqdm import tqdm
 from eval_utils import evaluate
 from torchinfo import summary
+
+def set_reproducibility(seed: int, deterministic: bool = True):
+    """
+    Enforces end-to-end deterministic execution following SOTA recommendations
+    (Pineau et al., 2021; Pham et al., 2020; Ferrari Dacrema et al., 2019).
+    """
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception as e:
+            print(f"[WARNING] torch.use_deterministic_algorithms failed: {e}")
+
+    print(f"[INFO] Full reproducibility enabled: seed={seed}, deterministic={deterministic}")
+
+def seed_worker(worker_id):
+    """
+    Ensures that DataLoader worker processes produce deterministic random sequences.
+    """
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 models_dir = "models"
 if not os.path.exists(models_dir):
@@ -24,7 +60,18 @@ parser.add_argument('--bias_only_l1_ffn', action='store_true',
                     help="Convenience alias to set Layer 1 FFN to bias-only mode")
 parser.add_argument('--warm_bias_from', type=str, default=None,
                     help="Path to checkpoint from which to initialize the bias vector for bias-only layers")
+parser.add_argument('--seed', type=int, default=None,
+                    help="Random seed for full reproducibility (Python, NumPy, PyTorch CPU/CUDA)")
+parser.add_argument('--deterministic', action='store_true',
+                    help="Force strict deterministic PyTorch/cuDNN/cuBLAS algorithms")
 args = parser.parse_args()
+
+# Apply SOTA reproducibility setup if requested
+seed_val = None
+if args.seed is not None or args.deterministic:
+    seed_val = 42 if args.seed is None else args.seed
+    set_reproducibility(seed=seed_val, deterministic=True)
+
 config = load_config(args.config)
 
 # Determine disabled FFN layers from CLI arguments and/or config object
@@ -91,11 +138,18 @@ if args.warm_bias_from and bias_only_layers:
     else:
         raise FileNotFoundError(f"Warm bias checkpoint not found: {args.warm_bias_from}")
 
+dl_generator = None
+if seed_val is not None:
+    dl_generator = torch.Generator()
+    dl_generator.manual_seed(seed_val)
+
 train_dataloader = get_train_dataloader(
     config.dataset_name,
     batch_size=config.train_batch_size,
     max_length=config.sequence_length,
-    train_neg_per_positive=config.negs_per_pos
+    train_neg_per_positive=config.negs_per_pos,
+    generator=dl_generator,
+    worker_init_fn=seed_worker if dl_generator is not None else None
 )
 val_dataloader = get_val_dataloader(
     config.dataset_name,
@@ -171,7 +225,8 @@ for epoch in range(config.max_epochs):
     print(f"Epoch {epoch} evaluation result: {evaluation_result}")
     if evaluation_result[config.val_metric] > best_metric:
         best_metric = evaluation_result[config.val_metric]
-        model_name = f"models/gsasrec-{config.dataset_name}-step_{step}-t_{config.gbce_t}-negs_{config.negs_per_pos}-emb_{config.embedding_dim}-dropout_{config.dropout_rate}-metric_{best_metric}.pt" 
+        seed_tag = f"-seed_{seed_val}" if seed_val is not None else ""
+        model_name = f"models/gsasrec-{config.dataset_name}{seed_tag}-step_{step}-t_{config.gbce_t}-negs_{config.negs_per_pos}-emb_{config.embedding_dim}-dropout_{config.dropout_rate}-metric_{best_metric}.pt" 
         print(f"Saving new best model to {model_name}")
         if best_model_name is not None:
             os.remove(best_model_name)

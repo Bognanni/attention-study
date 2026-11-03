@@ -57,11 +57,18 @@ def get_padding_value(dataset_dir):
     padding_value = stats['num_items'] + 1
     return padding_value
 
-def get_train_dataloader(dataset_name, batch_size=32, max_length=200, train_neg_per_positive=256):
+def get_train_dataloader(dataset_name, batch_size=32, max_length=200, train_neg_per_positive=256, generator=None, worker_init_fn=None):
     dataset_dir = f"datasets/{dataset_name}"
     padding_value = get_padding_value(dataset_dir)
     train_dataset = SequenceDataset(f"{dataset_dir}/train/input.txt", max_length=max_length + 1, padding_value=padding_value) # +1 for sequence shifting
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=lambda x: collate_with_random_negatives(x, padding_value , train_neg_per_positive))
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=generator,
+        worker_init_fn=worker_init_fn,
+        collate_fn=lambda x: collate_with_random_negatives(x, padding_value, train_neg_per_positive)
+    )
     return train_loader
 
 def get_val_or_test_dataloader(dataset_name, part='val', batch_size=32, max_length=200):
