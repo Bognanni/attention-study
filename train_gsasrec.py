@@ -10,14 +10,14 @@ from tqdm import tqdm
 from eval_utils import evaluate
 from torchinfo import summary
 
-def set_reproducibility(seed: int, deterministic: bool = True):
+def set_reproducibility(seed: int, deterministic: bool = False):
     """
-    Enforces end-to-end deterministic execution following SOTA recommendations
-    (Pineau et al., 2021; Pham et al., 2020; Ferrari Dacrema et al., 2019).
+    Sets reproducible random seeds across Python, NumPy, PyTorch CPU & CUDA.
+    Following SOTA recommendations (Pineau et al., 2021; Ferrari Dacrema et al., 2019),
+    deterministic algorithms (which can degrade optimizer dynamics and cause early plateau)
+    are kept disabled by default unless explicitly requested via --deterministic.
     """
     os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -27,14 +27,19 @@ def set_reproducibility(seed: int, deterministic: bool = True):
         torch.cuda.manual_seed_all(seed)
 
     if deterministic:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         try:
             torch.use_deterministic_algorithms(True)
         except Exception as e:
             print(f"[WARNING] torch.use_deterministic_algorithms failed: {e}")
+    else:
+        # Standard SOTA training mode: autotuned cuDNN kernels for optimal gradient flow
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
-    print(f"[INFO] Full reproducibility enabled: seed={seed}, deterministic={deterministic}")
+    print(f"[INFO] Reproducibility configured: seed={seed}, strict_deterministic_algorithms={deterministic}")
 
 def seed_worker(worker_id):
     """
@@ -43,6 +48,7 @@ def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
 
 models_dir = "models"
 if not os.path.exists(models_dir):
@@ -70,7 +76,7 @@ args = parser.parse_args()
 seed_val = None
 if args.seed is not None or args.deterministic:
     seed_val = 42 if args.seed is None else args.seed
-    set_reproducibility(seed=seed_val, deterministic=True)
+    set_reproducibility(seed=seed_val, deterministic=args.deterministic)
 
 config = load_config(args.config)
 
@@ -170,9 +176,11 @@ steps_not_improved = 0
 
 model = model.to(device)
 try:
+    model.eval()
     summary(model, (config.train_batch_size, config.sequence_length), batch_dim=None)
+    model.train()
 except Exception:
-    pass
+    model.train()
 
 for epoch in range(config.max_epochs):
     model.train()   

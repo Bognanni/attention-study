@@ -35,9 +35,9 @@ class SequenceDataset(Dataset):
 
         return inp_tensor,
 
-def collate_with_random_negatives(input_batch, pad_value, num_negatives):
+def collate_with_random_negatives(input_batch, pad_value, num_negatives, generator=None):
     batch_cat = torch.stack([input_batch[i][0] for i in range(len(input_batch))], dim=0)
-    negatives = torch.randint(low=1, high=pad_value, size=(batch_cat.size(0), batch_cat.size(1), num_negatives))
+    negatives = torch.randint(low=1, high=pad_value, size=(batch_cat.size(0), batch_cat.size(1), num_negatives), generator=generator)
     return [batch_cat, negatives]
 
 def collate_val_test(input_batch):
@@ -67,7 +67,7 @@ def get_train_dataloader(dataset_name, batch_size=32, max_length=200, train_neg_
         shuffle=True,
         generator=generator,
         worker_init_fn=worker_init_fn,
-        collate_fn=lambda x: collate_with_random_negatives(x, padding_value, train_neg_per_positive)
+        collate_fn=lambda x: collate_with_random_negatives(x, padding_value, train_neg_per_positive, generator=generator)
     )
     return train_loader
 
