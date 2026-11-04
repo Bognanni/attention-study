@@ -24,7 +24,16 @@ parser.add_argument('--bias_only_l1_ffn', action='store_true',
                     help="Convenience alias to set Layer 1 FFN to bias-only mode")
 parser.add_argument('--warm_bias_from', type=str, default=None,
                     help="Path to checkpoint from which to initialize the bias vector for bias-only layers")
+parser.add_argument('--seed', type=int, default=None,
+                    help="Optional random seed (defaults to auto-generated system seed)")
 args = parser.parse_args()
+
+if args.seed is not None:
+    torch.manual_seed(args.seed)
+
+initial_seed = torch.initial_seed()
+print(f"[INFO] Initial seed: {initial_seed}")
+
 config = load_config(args.config)
 
 # Determine disabled FFN layers from CLI arguments and/or config object
@@ -171,7 +180,7 @@ for epoch in range(config.max_epochs):
     print(f"Epoch {epoch} evaluation result: {evaluation_result}")
     if evaluation_result[config.val_metric] > best_metric:
         best_metric = evaluation_result[config.val_metric]
-        model_name = f"models/gsasrec-{config.dataset_name}-step_{step}-t_{config.gbce_t}-negs_{config.negs_per_pos}-emb_{config.embedding_dim}-dropout_{config.dropout_rate}-metric_{best_metric}.pt" 
+        model_name = f"models/gsasrec-{config.dataset_name}-seed_{initial_seed}-step_{step}-t_{config.gbce_t}-negs_{config.negs_per_pos}-emb_{config.embedding_dim}-dropout_{config.dropout_rate}-metric_{best_metric}.pt" 
         print(f"Saving new best model to {model_name}")
         if best_model_name is not None:
             os.remove(best_model_name)
