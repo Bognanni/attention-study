@@ -35,9 +35,9 @@ class SequenceDataset(Dataset):
 
         return inp_tensor,
 
-def collate_with_random_negatives(input_batch, pad_value, num_negatives, generator=None):
+def collate_with_random_negatives(input_batch, pad_value, num_negatives):
     batch_cat = torch.stack([input_batch[i][0] for i in range(len(input_batch))], dim=0)
-    negatives = torch.randint(low=1, high=pad_value, size=(batch_cat.size(0), batch_cat.size(1), num_negatives), generator=generator)
+    negatives = torch.randint(low=1, high=pad_value, size=(batch_cat.size(0), batch_cat.size(1), num_negatives))
     return [batch_cat, negatives]
 
 def collate_val_test(input_batch):
@@ -57,18 +57,11 @@ def get_padding_value(dataset_dir):
     padding_value = stats['num_items'] + 1
     return padding_value
 
-def get_train_dataloader(dataset_name, batch_size=32, max_length=200, train_neg_per_positive=256, generator=None, worker_init_fn=None):
+def get_train_dataloader(dataset_name, batch_size=32, max_length=200, train_neg_per_positive=256):
     dataset_dir = f"datasets/{dataset_name}"
     padding_value = get_padding_value(dataset_dir)
     train_dataset = SequenceDataset(f"{dataset_dir}/train/input.txt", max_length=max_length + 1, padding_value=padding_value) # +1 for sequence shifting
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        generator=generator,
-        worker_init_fn=worker_init_fn,
-        collate_fn=lambda x: collate_with_random_negatives(x, padding_value, train_neg_per_positive, generator=generator)
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=lambda x: collate_with_random_negatives(x, padding_value , train_neg_per_positive))
     return train_loader
 
 def get_val_or_test_dataloader(dataset_name, part='val', batch_size=32, max_length=200):
